@@ -34,6 +34,12 @@ Relay nodes use bearer authentication and the `/relay/v1/nodes/{nodeId}` routes.
 
 Expose Discord and relay routes only through HTTPS. A relay bearer token grants permission to publish observations and, while that node owns the current epoch, claim Discord-to-game work.
 
+## Linux service deployment
+
+Publish the coordinator self-contained for the target Linux architecture and keep each immutable release under `/srv/sapphire-avenue-assistant/releases`. Point `/srv/sapphire-avenue-assistant/current` at the active release, retain the SQLite authority under `/srv/sapphire-avenue-assistant/shared`, and install `deploy/sapphire-avenue-assistant.service` as the systemd unit.
+
+The unit reads `/etc/sapphire-avenue-assistant/sapphire-avenue.env`, which must be owned by root and mode `0600`. Set the database path to `/srv/sapphire-avenue-assistant/shared/sapphire-avenue.db`; keep the Discord bot token and per-node tokens only in that file. The included Caddy fragment exposes the service below `/sapphire-avenue/` while Kestrel remains bound to loopback port 5130.
+
 ## Configuration
 
 Non-secret defaults live in `appsettings.json`. Supply the Discord public key, bot token, IDs, and each relay-node token through environment variables or a deployment secret store. Never put Square Enix credentials in this service.
