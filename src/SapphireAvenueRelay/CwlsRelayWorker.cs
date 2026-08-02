@@ -61,6 +61,8 @@ internal sealed class CwlsRelayWorker : IDisposable
 
     public string RuntimeInstanceId => runtimeInstanceId;
 
+    public void MarkDisabled() => SetDisabled();
+
     public RelaySnapshot CreateSnapshot()
     {
         var slots = CwlsStateReader.ReadSlots();
@@ -164,7 +166,11 @@ internal sealed class CwlsRelayWorker : IDisposable
         {
             try
             {
-                if (!IsCoordinatorConfigured())
+                if (!configuration.ObserveToDiscordEnabled && !configuration.DiscordToGameEnabled)
+                {
+                    SetDisabled();
+                }
+                else if (!IsCoordinatorConfigured())
                 {
                     SetDisconnected("Relay coordinator is not configured.");
                 }
@@ -460,6 +466,18 @@ internal sealed class CwlsRelayWorker : IDisposable
             role = "offline";
             leaseExpiresAtUtc = null;
             lastError = error;
+        }
+    }
+
+    private void SetDisabled()
+    {
+        lock (gate)
+        {
+            coordinatorReachable = false;
+            role = "disabled";
+            epoch = 0;
+            leaseExpiresAtUtc = null;
+            lastError = null;
         }
     }
 

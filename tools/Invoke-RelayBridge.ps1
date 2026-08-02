@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('hello', 'get-manifest', 'get-snapshot', 'configure-relay', 'set-directions', 'send-test')]
+    [ValidateSet('hello', 'get-manifest', 'get-snapshot', 'configure-relay', 'clear-relay', 'set-directions', 'send-test')]
     [string]$Command = 'get-snapshot',
 
     [string]$ArgumentsJson,

@@ -6,7 +6,7 @@ The plugin starts with both directions disabled. Before it can relay, an operato
 
 Game-bound messages use one epoch-fenced coordinator leader. A send is reported as successful only after the plugin observes the matching CWLS echo from the local character; missing echoes and uncertain failures are sealed as ambiguous rather than retried.
 
-The plugin exposes an authenticated local Agent Bridge manifest and allowlisted semantic commands. `tools/Invoke-RelayBridge.ps1` can read its manifest/snapshot, configure it, enable directions, and perform an explicit verified test send without desktop automation. Node and bridge tokens are protected at rest with Windows DPAPI and are never returned in snapshots.
+The plugin exposes an authenticated local Agent Bridge manifest and allowlisted semantic commands. `tools/Invoke-RelayBridge.ps1` can read its manifest/snapshot, configure or clear it, enable directions, and perform an explicit verified test send without desktop automation. Node and bridge tokens are protected at rest with Windows DPAPI and are never returned in snapshots.
 
 Sapphire Avenue Assistant is the Discord-side coordinator for a one-channel FFXIV cross-world linkshell relay.
 

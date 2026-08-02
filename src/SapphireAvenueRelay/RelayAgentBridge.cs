@@ -38,6 +38,7 @@ internal sealed class RelayAgentBridge : IDisposable
 
         router.Register("get-snapshot", GetSnapshotAsync);
         router.Register("configure-relay", ConfigureAsync);
+        router.Register("clear-relay", ClearRelayAsync);
         router.Register("set-directions", SetDirectionsAsync);
         router.Register("send-test", SendTestAsync);
 
@@ -83,6 +84,12 @@ internal sealed class RelayAgentBridge : IDisposable
                 "Set relay directions",
                 "relay",
                 AgentBridgeUiControlKind.Toggle,
+                true),
+            new AgentBridgeActionDescriptor(
+                "clear-relay",
+                "Clear relay configuration",
+                "relay",
+                AgentBridgeUiControlKind.Button,
                 true),
             new AgentBridgeActionDescriptor(
                 "send-test",
@@ -132,6 +139,7 @@ internal sealed class RelayAgentBridge : IDisposable
                 configuration.ObserveToDiscordEnabled = false;
                 configuration.DiscordToGameEnabled = false;
                 Save();
+                worker.MarkDisabled();
             }, cancellationToken: cancellationToken).ConfigureAwait(false);
 
             var snapshot = await framework.RunOnTick(worker.CreateSnapshot, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -167,6 +175,25 @@ internal sealed class RelayAgentBridge : IDisposable
             Save();
         }, cancellationToken: cancellationToken).ConfigureAwait(false);
         return AgentBridgeResponse.Ok("Relay directions updated.", await framework.RunOnTick(worker.CreateSnapshot, cancellationToken: cancellationToken).ConfigureAwait(false));
+    }
+
+    private async ValueTask<AgentBridgeResponse> ClearRelayAsync(AgentBridgeRequest _, CancellationToken cancellationToken)
+    {
+        await framework.RunOnTick(() =>
+        {
+            configuration.ObserveToDiscordEnabled = false;
+            configuration.DiscordToGameEnabled = false;
+            configuration.CoordinatorBaseUrl = string.Empty;
+            configuration.NodeId = string.Empty;
+            configuration.RelayProtectedAccessToken = string.Empty;
+            configuration.CwlsSlot = 0;
+            configuration.ExpectedCwlsName = string.Empty;
+            Save();
+            worker.MarkDisabled();
+        }, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return AgentBridgeResponse.Ok(
+            "Relay configuration and protected node credential cleared; both directions remain disabled.",
+            await framework.RunOnTick(worker.CreateSnapshot, cancellationToken: cancellationToken).ConfigureAwait(false));
     }
 
     private async ValueTask<AgentBridgeResponse> SendTestAsync(AgentBridgeRequest request, CancellationToken cancellationToken)
