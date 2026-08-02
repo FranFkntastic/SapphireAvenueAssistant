@@ -1,0 +1,53 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <GenerateAssemblyInformationalVersionAttribute>false</GenerateAssemblyInformationalVersionAttribute>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <Platforms>x64</Platforms>
+    <Name>SapphireAvenueRelay</Name>
+    <AssemblyName>SapphireAvenueRelay</AssemblyName>
+    <Author>FranFkntastic</Author>
+    <Description>Verified relay between one FFXIV cross-world linkshell and Sapphire Avenue Assistant.</Description>
+    <Punchline>Links one CWLS to one Discord channel.</Punchline>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ECommons" Version="3.2.1.15" />
+    <Content Include="SapphireAvenueRelay.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <ProjectReference Include="$(FranthropyDalamudProject)" />
+    <InternalsVisibleTo Include="SapphireAvenueRelay.Tests" />
+  </ItemGroup>
+
+  <Target Name="GenerateBuildIdentity" BeforeTargets="CoreCompile">
+    <Exec Command="git branch --show-current" ConsoleToMsBuild="true" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" ItemName="_GitBranchOutput" />
+    </Exec>
+    <Exec Command="git rev-parse --short HEAD" ConsoleToMsBuild="true" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" ItemName="_GitCommitOutput" />
+    </Exec>
+    <Exec Command="git status --porcelain" ConsoleToMsBuild="true" StandardOutputImportance="Low">
+      <Output TaskParameter="ConsoleOutput" ItemName="_GitStatusOutput" />
+    </Exec>
+    <PropertyGroup>
+      <GitBranch>@(_GitBranchOutput)</GitBranch>
+      <GitCommit>@(_GitCommitOutput)</GitCommit>
+      <GitBranch Condition="'$(GitBranch)' == ''">unknown</GitBranch>
+      <GitCommit Condition="'$(GitCommit)' == ''">unknown</GitCommit>
+      <GitBranch>$([System.String]::Copy('$(GitBranch)').Replace('/', '-').Replace('\', '-').Replace(' ', '-'))</GitBranch>
+      <GitDirtySuffix Condition="'@(_GitStatusOutput)' != ''">.dirty</GitDirtySuffix>
+      <GeneratedBuildInfoPath>$(IntermediateOutputPath)SapphireAvenueRelay.BuildInfo.g.cs</GeneratedBuildInfoPath>
+    </PropertyGroup>
+    <ItemGroup>
+      <_GeneratedBuildInfoLine Include="using System.Reflection%3B" />
+      <_GeneratedBuildInfoLine Include="[assembly: AssemblyInformationalVersion(&quot;$(Version)+$(GitBranch).$(GitCommit)$(GitDirtySuffix)&quot;)]" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(GeneratedBuildInfoPath)" Lines="@(_GeneratedBuildInfoLine)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup><Compile Include="$(GeneratedBuildInfoPath)" /></ItemGroup>
+  </Target>
+</Project>

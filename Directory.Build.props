@@ -3,5 +3,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <FranthropyRoot Condition="'$(FranthropyRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\Franthropy'))</FranthropyRoot>
+    <FranthropyDalamudProject Condition="'$(FranthropyDalamudProject)' == ''">$(FranthropyRoot)\src\Franthropy.Dalamud\Franthropy.Dalamud.csproj</FranthropyDalamudProject>
   </PropertyGroup>
 </Project>

@@ -1,0 +1,13 @@
+{
+  "Author": "FranFkntastic",
+  "Name": "Sapphire Avenue Relay",
+  "Punchline": "Links one CWLS to one Discord channel.",
+  "Description": "A fail-closed relay node for Sapphire Avenue Assistant. It verifies the configured CWLS and confirms game-bound delivery from the authoritative chat echo.",
+  "InternalName": "SapphireAvenueRelay",
+  "AssemblyVersion": "0.1.0.0",
+  "DalamudApiLevel": 15,
+  "ApplicableVersion": "any",
+  "Tags": ["discord", "linkshell", "relay"],
+  "CategoryTags": ["social"],
+  "IsTestingExclusive": true
+}
