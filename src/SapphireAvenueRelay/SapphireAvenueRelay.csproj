@@ -25,9 +25,6 @@
   </ItemGroup>
 
   <Target Name="GenerateBuildIdentity" BeforeTargets="CoreCompile">
-    <Exec Command="git branch --show-current" ConsoleToMsBuild="true" StandardOutputImportance="Low">
-      <Output TaskParameter="ConsoleOutput" ItemName="_GitBranchOutput" />
-    </Exec>
     <Exec Command="git rev-parse --short HEAD" ConsoleToMsBuild="true" StandardOutputImportance="Low">
       <Output TaskParameter="ConsoleOutput" ItemName="_GitCommitOutput" />
     </Exec>
@@ -35,17 +32,14 @@
       <Output TaskParameter="ConsoleOutput" ItemName="_GitStatusOutput" />
     </Exec>
     <PropertyGroup>
-      <GitBranch>@(_GitBranchOutput)</GitBranch>
       <GitCommit>@(_GitCommitOutput)</GitCommit>
-      <GitBranch Condition="'$(GitBranch)' == ''">unknown</GitBranch>
       <GitCommit Condition="'$(GitCommit)' == ''">unknown</GitCommit>
-      <GitBranch>$([System.String]::Copy('$(GitBranch)').Replace('/', '-').Replace('\', '-').Replace(' ', '-'))</GitBranch>
       <GitDirtySuffix Condition="'@(_GitStatusOutput)' != ''">.dirty</GitDirtySuffix>
       <GeneratedBuildInfoPath>$(IntermediateOutputPath)SapphireAvenueRelay.BuildInfo.g.cs</GeneratedBuildInfoPath>
     </PropertyGroup>
     <ItemGroup>
       <_GeneratedBuildInfoLine Include="using System.Reflection%3B" />
-      <_GeneratedBuildInfoLine Include="[assembly: AssemblyInformationalVersion(&quot;$(Version)+$(GitBranch).$(GitCommit)$(GitDirtySuffix)&quot;)]" />
+      <_GeneratedBuildInfoLine Include="[assembly: AssemblyInformationalVersion(&quot;$(Version)+$(GitCommit)$(GitDirtySuffix)&quot;)]" />
     </ItemGroup>
     <WriteLinesToFile File="$(GeneratedBuildInfoPath)" Lines="@(_GeneratedBuildInfoLine)" Overwrite="true" WriteOnlyWhenDifferent="true" />
     <ItemGroup><Compile Include="$(GeneratedBuildInfoPath)" /></ItemGroup>
