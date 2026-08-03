@@ -1,13 +1,13 @@
 {
   "Author": "FranFkntastic",
-  "Name": "Sapphire Avenue Relay",
-  "Punchline": "Links one CWLS to one Discord channel.",
-  "Description": "A fail-closed relay node for Sapphire Avenue Assistant. It verifies the configured CWLS and confirms game-bound delivery from the authoritative chat echo.",
+  "Name": "Sapphire Avenue Discord Bridge",
+  "Punchline": "Bridge one CWLS with your community Discord.",
+  "Description": "By FranFkntastic. Connect one FFXIV cross-world linkshell to a community-owned Discord bot with exact CWLS identity checks.",
   "InternalName": "SapphireAvenueRelay",
-  "AssemblyVersion": "0.1.0.0",
+  "AssemblyVersion": "0.2.0.0",
   "DalamudApiLevel": 15,
   "ApplicableVersion": "any",
   "Tags": ["discord", "linkshell", "relay"],
   "CategoryTags": ["social"],
-  "IsTestingExclusive": true
+  "IsTestingExclusive": false
 }

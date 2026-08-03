@@ -1,16 +1,16 @@
-# Sapphire Avenue Assistant
+# Sapphire Avenue Discord Bridge
 
-Sapphire Avenue Assistant is a fail-closed bridge between one Discord channel and one FFXIV cross-world linkshell. The repository contains the durable Discord/coordinator service and `SapphireAvenueRelay`, a Dalamud relay node.
+Sapphire Avenue Discord Bridge is a fail-closed bridge between a community-owned Discord bot/channel and one FFXIV cross-world linkshell. Sapphire Avenue is the maker's mark, not a server restriction. The repository contains the durable Discord coordinator and `SapphireAvenueRelay`, the Dalamud relay node.
 
-The plugin starts with both directions disabled. Before it can relay, an operator must configure an HTTPS coordinator (loopback HTTP is accepted for development), a per-node token, a CWLS slot, and the exact expected linkshell name. Every observation and send rechecks that slot/name pair, so a reordered or missing CWLS pauses the relay instead of writing into another chat.
+The plugin starts with both directions disabled. A Discord server manager creates a short-lived node code with `/bridge add-node`; the player enters that code and the HTTPS coordinator address in `/sadbridge`, then selects a CWLS by name from the character's current memberships. Every observation and send rechecks the saved slot/name pair, so a reordered or missing CWLS pauses the relay instead of writing into another chat.
 
 Game-bound messages use one epoch-fenced coordinator leader. A send is reported as successful only after the plugin observes the matching CWLS echo from the local character; missing echoes and uncertain failures are sealed as ambiguous rather than retried.
 
 The plugin exposes an authenticated local Agent Bridge manifest and allowlisted semantic commands. `tools/Invoke-RelayBridge.ps1` can read its manifest/snapshot, configure or clear it, enable directions, and perform an explicit verified test send without desktop automation. Node and bridge tokens are protected at rest with Windows DPAPI and are never returned in snapshots.
 
-Sapphire Avenue Assistant is the Discord-side coordinator for a one-channel FFXIV cross-world linkshell relay.
+The first release boundary is deliberately one coordinator deployment per community-owned Discord application and guild. Shared multi-community hosting is not implied: the relay message, observation, and lease tables are not tenant-partitioned yet.
 
-V1 accepts a signed `/cwls message` Discord interaction, persists it for a game relay, elects exactly one transmitting relay with a short epoch-fenced lease, and publishes idempotent CWLS observations back to the configured Discord channel. The included game plugin consumes that versioned HTTP contract; this repository does not automate Square Enix account creation, login, or client operation.
+V1 accepts signed `/cwls message` and `/bridge` Discord interactions, persists game-bound work and management revisions, elects exactly one transmitting relay with a short epoch-fenced lease, and publishes idempotent CWLS observations back to the configured Discord channel. A preferred relay node wins an available lease, but never preempts a live sender. The included game plugin consumes that versioned HTTP contract; this repository does not automate Square Enix account creation, login, or client operation.
 
 Run one coordinator process against its local SQLite database. The relay *node* pool is highly available, but coordinator replication is not part of v1; multiple service processes would need a shared transactional authority before they could safely elect one game sender.
 
@@ -23,17 +23,26 @@ $env:SapphireAvenue__Discord__PublicKey = '<discord-application-public-key>'
 $env:SapphireAvenue__Discord__BotToken = '<discord-bot-token>'
 $env:SapphireAvenue__Discord__ApplicationId = '<discord-application-id>'
 $env:SapphireAvenue__Discord__GuildId = '<discord-server-id>'
-$env:SapphireAvenue__Discord__ChannelId = '<relay-channel-id>'
-$env:SapphireAvenue__Relay__NodeTokens__relay_1 = '<random-node-secret>'
+$env:SapphireAvenue__Discord__ChannelId = '<initial-relay-channel-id>'
+$env:SapphireAvenue__Discord__AllowedRoleIds__0 = '<initial-message-role-id>'
 dotnet run --project .\src\SapphireAvenueAssistant
 ```
 
-Discord's Interactions Endpoint URL is `https://<host>/discord/interactions`. Register one guild command named `cwls` with one required string option named `message`; restrict command visibility through Discord permissions as well as the service's optional `AllowedRoleIds` check.
+Discord's Interactions Endpoint URL is `https://<host>/discord/interactions`. The coordinator reconciles the guild commands it owns (`cwls` and `bridge`) without deleting unrelated commands. `/bridge` is discoverable to members with Manage Server permission, and the endpoint independently rechecks the current signed permission on every management interaction.
 
-Relay nodes use bearer authentication and the `/relay/v1/nodes/{nodeId}` routes. A node must heartbeat, retain the returned instance/epoch lease, claim one outbound line, and complete the claim as `sent`, `not-sent`, or `ambiguous`. An expired claim is deliberately sealed as ambiguous instead of being transmitted twice.
+## Configure a relay
+
+1. A server manager runs `/bridge configure` and selects the relay channel and role allowed to use `/cwls message`.
+2. The manager runs `/bridge add-node` with a friendly installation name. Discord returns a 13-character, ten-minute pairing code ephemerally.
+3. The player opens `/sadbridge`, enters the HTTPS coordinator URL and pairing code, and selects a discovered CWLS by name.
+4. The manager may use `/bridge prefer-node` to nominate the relay account. Standbys take over only after the active lease expires.
+
+`/bridge status`, `/bridge list-nodes`, `/bridge pause`, `/bridge clear-preference`, and `/bridge revoke-node` remain available while every FFXIV client is offline. The durable node bearer is returned only to the pairing plugin, stored with Windows DPAPI, and never placed in Discord.
+
+Relay nodes use bearer authentication and the `/relay/v1/nodes/{nodeId}` routes. A node must heartbeat with `canSendToGame`, retain the returned instance/epoch lease, claim one outbound line, and complete the claim as `sent`, `not-sent`, or `ambiguous`. During rolling upgrades, an omitted capability remains temporarily eligible only while `Relay.AllowLegacyHeartbeatWithoutCapability` is enabled; disable that compatibility switch after every node reports the field. An expired claim is deliberately sealed as ambiguous instead of being transmitted twice. Revocation clears the credential, preference, and any current lease for that node.
 
 Expose Discord and relay routes only through HTTPS. A relay bearer token grants permission to publish observations and, while that node owns the current epoch, claim Discord-to-game work.
 
 ## Configuration
 
-Non-secret defaults live in `appsettings.json`. Supply the Discord public key, bot token, IDs, and each relay-node token through environment variables or a deployment secret store. Never put Square Enix credentials in this service.
+Non-secret defaults live in `appsettings.json`. Supply the community's Discord public key, bot token, application ID, and guild ID through environment variables or a deployment secret store. The bot token never enters Discord or the plugin. `Relay:NodeTokens` remains a legacy deployment bootstrap for existing installations; newly distributed nodes use one-time pairing and hash-only server persistence. Never put Square Enix credentials in this service.

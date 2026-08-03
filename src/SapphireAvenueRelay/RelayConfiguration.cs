@@ -5,7 +5,7 @@ namespace SapphireAvenueRelay;
 
 public sealed class RelayConfiguration : IPluginConfiguration
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
 
     public string PluginInstanceId { get; set; } = Guid.NewGuid().ToString("N");
 
@@ -14,6 +14,8 @@ public sealed class RelayConfiguration : IPluginConfiguration
     public string CoordinatorBaseUrl { get; set; } = string.Empty;
 
     public string NodeId { get; set; } = string.Empty;
+
+    public string NodeLabel { get; set; } = string.Empty;
 
     public string RelayProtectedAccessToken { get; set; } = string.Empty;
 

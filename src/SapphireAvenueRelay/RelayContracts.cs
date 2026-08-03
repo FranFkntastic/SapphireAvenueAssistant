@@ -3,8 +3,14 @@ using System.Text.Json.Serialization;
 
 namespace SapphireAvenueRelay;
 
-internal sealed record HeartbeatRequest(string InstanceId);
-internal sealed record HeartbeatResponse(string Role, long Epoch, DateTimeOffset ExpiresAtUtc);
+internal sealed record HeartbeatRequest(string InstanceId, bool CanSendToGame);
+internal sealed record HeartbeatResponse(
+    string Role,
+    long Epoch,
+    DateTimeOffset ExpiresAtUtc,
+    bool IsPreferred = false);
+internal sealed record PairNodeRequest(string PairingCode);
+internal sealed record PairNodeResponse(string NodeId, string NodeLabel, string AccessToken);
 internal sealed record ClaimRequest(string InstanceId, long Epoch);
 internal sealed record OutboundRelayMessage(
     string MessageId,
@@ -51,9 +57,11 @@ internal sealed record RelaySnapshot(
     bool SlotMatches,
     bool ObserveToDiscordEnabled,
     bool DiscordToGameEnabled,
+    bool CanSendToGame,
     bool CoordinatorConfigured,
     bool CoordinatorReachable,
     string Role,
+    bool IsPreferred,
     long Epoch,
     DateTimeOffset? LeaseExpiresAtUtc,
     int PendingObservationCount,
@@ -76,6 +84,8 @@ internal sealed record SendTestArguments(string? Message);
 [JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]
 [JsonSerializable(typeof(HeartbeatRequest))]
 [JsonSerializable(typeof(HeartbeatResponse))]
+[JsonSerializable(typeof(PairNodeRequest))]
+[JsonSerializable(typeof(PairNodeResponse))]
 [JsonSerializable(typeof(ClaimRequest))]
 [JsonSerializable(typeof(OutboundRelayMessage))]
 [JsonSerializable(typeof(CompletionRequest))]

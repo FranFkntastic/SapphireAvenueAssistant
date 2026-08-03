@@ -116,8 +116,7 @@ internal sealed class RelayAgentBridge : IDisposable
             var coordinatorUri = RelayCoordinatorClient.ValidateBaseUri(arguments.CoordinatorBaseUrl ?? string.Empty);
             var nodeId = arguments.NodeId?.Trim() ?? string.Empty;
             var expectedName = arguments.ExpectedCwlsName?.Trim() ?? string.Empty;
-            if (nodeId.Length is < 1 or > 64 ||
-                nodeId.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_' and not '.' and not ':'))
+            if (!RelayConfigurationPolicy.IsNodeIdValid(nodeId))
                 return AgentBridgeResponse.Fail("Node ID is invalid.");
             if (arguments.CwlsSlot is < 1 or > 8 || string.IsNullOrWhiteSpace(expectedName))
                 return AgentBridgeResponse.Fail("CWLS slot must be 1-8 and expected name must be explicit.");
@@ -128,6 +127,7 @@ internal sealed class RelayAgentBridge : IDisposable
             {
                 configuration.CoordinatorBaseUrl = coordinatorUri.AbsoluteUri;
                 configuration.NodeId = nodeId;
+                configuration.NodeLabel = string.Empty;
                 configuration.CwlsSlot = arguments.CwlsSlot;
                 configuration.ExpectedCwlsName = expectedName;
                 if (!string.IsNullOrWhiteSpace(arguments.NodeToken))
@@ -185,6 +185,7 @@ internal sealed class RelayAgentBridge : IDisposable
             configuration.DiscordToGameEnabled = false;
             configuration.CoordinatorBaseUrl = string.Empty;
             configuration.NodeId = string.Empty;
+            configuration.NodeLabel = string.Empty;
             configuration.RelayProtectedAccessToken = string.Empty;
             configuration.CwlsSlot = 0;
             configuration.ExpectedCwlsName = string.Empty;

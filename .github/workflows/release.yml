@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  draft:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: SapphireAvenueAssistant
+      - uses: actions/checkout@v6
+        with:
+          repository: FranFkntastic/Franthropy
+          path: Franthropy
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build release artifacts
+        working-directory: SapphireAvenueAssistant
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Invalid release tag: $env:GITHUB_REF_NAME" }
+
+          dotnet build src/SapphireAvenueRelay/SapphireAvenueRelay.csproj -c Release -p:Platform=x64 `
+            -p:Version=$version -p:FranthropyRoot="$env:GITHUB_WORKSPACE\Franthropy"
+          if ($LASTEXITCODE -ne 0) { throw 'Plugin build failed.' }
+
+          $sdkPackage = 'src/SapphireAvenueRelay/bin/x64/Release/SapphireAvenueRelay/latest.zip'
+          if (-not (Test-Path $sdkPackage)) { throw 'Dalamud SDK did not produce latest.zip.' }
+          New-Item -ItemType Directory -Force -Path 'artifacts/release' | Out-Null
+          Copy-Item $sdkPackage 'artifacts/release/SapphireAvenueDiscordBridge.zip'
+
+          dotnet publish src/SapphireAvenueAssistant/SapphireAvenueAssistant.csproj -c Release -r linux-x64 `
+            --self-contained true -o artifacts/release/coordinator -p:Version=$version
+          if ($LASTEXITCODE -ne 0) { throw 'Coordinator publish failed.' }
+          Compress-Archive 'artifacts/release/coordinator/*' 'artifacts/release/SapphireAvenueDiscordBridge-coordinator-linux-x64.zip'
+
+          Get-FileHash artifacts/release/*.zip -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } |
+            Set-Content artifacts/release/SHA256SUMS.txt
+
+      - name: Create draft release
+        working-directory: SapphireAvenueAssistant
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            artifacts/release/*.zip `
+            artifacts/release/SHA256SUMS.txt `
+            --verify-tag --generate-notes --draft

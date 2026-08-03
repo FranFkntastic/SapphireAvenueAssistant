@@ -1,6 +1,6 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>0.1.0.0</Version>
+    <Version>0.2.0.0</Version>
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
@@ -8,11 +8,11 @@
     <GenerateAssemblyInformationalVersionAttribute>false</GenerateAssemblyInformationalVersionAttribute>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <Platforms>x64</Platforms>
-    <Name>SapphireAvenueRelay</Name>
+    <Name>Sapphire Avenue Discord Bridge</Name>
     <AssemblyName>SapphireAvenueRelay</AssemblyName>
     <Author>FranFkntastic</Author>
-    <Description>Verified relay between one FFXIV cross-world linkshell and Sapphire Avenue Assistant.</Description>
-    <Punchline>Links one CWLS to one Discord channel.</Punchline>
+    <Description>Connect one FFXIV cross-world linkshell to a community-owned Discord bot.</Description>
+    <Punchline>Bridge one CWLS with your community Discord.</Punchline>
   </PropertyGroup>
 
   <ItemGroup>

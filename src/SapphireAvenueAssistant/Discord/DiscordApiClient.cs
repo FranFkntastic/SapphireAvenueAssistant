@@ -55,7 +55,14 @@ public sealed class DiscordApiClient(
         var content = RelayText.EscapeDiscordMarkdown(workItem.Content);
         var nonce = Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(workItem.ObservationId)))[..24];
-        var relativePath = $"channels/{Uri.EscapeDataString(options.Discord.ChannelId)}/messages";
+        if (!DiscordOptions.IsSnowflake(workItem.ChannelId))
+        {
+            return new DiscordPublishResult(
+                DiscordPublishOutcome.TerminalRejection,
+                Error: "Discord relay channel is not configured.");
+        }
+
+        var relativePath = $"channels/{Uri.EscapeDataString(workItem.ChannelId)}/messages";
         using var request = new HttpRequestMessage(HttpMethod.Post, relativePath)
         {
             Content = JsonContent.Create(new
@@ -69,7 +76,7 @@ public sealed class DiscordApiClient(
             })
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bot", options.Discord.BotToken);
-        request.Headers.UserAgent.ParseAdd("Sapphire-Avenue-Assistant/1.0");
+        request.Headers.UserAgent.ParseAdd("Sapphire-Avenue-Discord-Bridge/1.0");
 
         HttpResponseMessage response;
         try

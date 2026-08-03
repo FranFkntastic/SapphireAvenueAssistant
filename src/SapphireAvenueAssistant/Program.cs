@@ -22,6 +22,17 @@ builder.Services.AddHttpClient<IDiscordApiClient, DiscordApiClient>(client =>
     client.BaseAddress = new Uri("https://discord.com/api/v10/");
     client.Timeout = TimeSpan.FromSeconds(10);
 });
+builder.Services.AddHttpClient("DiscordCommandRegistration", client =>
+{
+    client.BaseAddress = new Uri("https://discord.com/api/v10/");
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
+builder.Services.AddSingleton(services => new DiscordCommandRegistrationService(
+    services.GetRequiredService<IHttpClientFactory>().CreateClient("DiscordCommandRegistration"),
+    services.GetRequiredService<SapphireAvenueOptions>(),
+    services.GetRequiredService<TimeProvider>(),
+    services.GetRequiredService<ILogger<DiscordCommandRegistrationService>>()));
+builder.Services.AddHostedService(services => services.GetRequiredService<DiscordCommandRegistrationService>());
 builder.Services.AddHostedService<DiscordInboundPublisher>();
 
 var app = builder.Build();
@@ -31,22 +42,36 @@ app.MapGet(
     "/",
     () => Results.Ok(new
     {
-        service = "Sapphire Avenue Assistant",
+        service = "Sapphire Avenue Discord Bridge",
         apiVersion = 1
     }));
 app.MapGet(
     "/healthz",
-    () => Results.Ok(new
+    async Task<IResult> (
+        RelayStore store,
+        DiscordCommandRegistrationService commandRegistration,
+        CancellationToken cancellationToken) =>
     {
-        status = sapphireOptions.Discord.CanVerifyInteractions &&
+        var relayConfiguration = await store.GetCommunityConfigurationAsync(
+            sapphireOptions.Discord.GuildId,
+            cancellationToken);
+        var relayNodes = await store.CountActiveNodesAsync(cancellationToken);
+        return Results.Ok(new
+        {
+            status = sapphireOptions.Discord.CanVerifyInteractions &&
             sapphireOptions.Discord.CanPublish &&
-            sapphireOptions.Relay.NodeTokens.Count > 0
+            relayConfiguration is not null &&
+            relayNodes > 0 &&
+            commandRegistration.Status == "ready"
                 ? "ready"
                 : "configuration-required",
-        discordInteractions = sapphireOptions.Discord.CanVerifyInteractions,
-        discordPublication = sapphireOptions.Discord.CanPublish,
-        relayNodes = sapphireOptions.Relay.NodeTokens.Count
-    }));
+            discordInteractions = sapphireOptions.Discord.CanVerifyInteractions,
+            discordPublication = sapphireOptions.Discord.CanPublish,
+            discordCommands = commandRegistration.Status,
+            relayConfigured = relayConfiguration is not null,
+            relayNodes
+        });
+    });
 app.MapDiscordInteractions();
 app.MapRelayEndpoints();
 

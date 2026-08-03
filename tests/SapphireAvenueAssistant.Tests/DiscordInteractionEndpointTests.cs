@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Net;
 using Chaos.NaCl;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -91,6 +92,136 @@ public sealed class DiscordInteractionEndpointTests
         Assert.Equal(64, response.RootElement.GetProperty("data").GetProperty("flags").GetInt32());
         var store = factory.Services.GetRequiredService<RelayStore>();
         Assert.Equal(1, await store.CountOutboundByInteractionAsync("10000000000000004"));
+
+        await factory.DisposeAsync();
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        foreach (var path in new[] { databasePath, $"{databasePath}-shm", $"{databasePath}-wal" })
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task BridgeManagementRechecksPermissionRejectsWrongIdentityAndControlsCwls()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"sapphire-avenue-bridge-{Guid.NewGuid():N}.db");
+        var seed = Enumerable.Range(33, 32).Select(value => (byte)value).ToArray();
+        Ed25519.KeyPairFromSeed(out var publicKey, out var expandedPrivateKey, seed);
+        var testOptions = new SapphireAvenueOptions
+        {
+            Discord = new DiscordOptions
+            {
+                PublicKey = Convert.ToHexString(publicKey),
+                ApplicationId = "10000000000000001",
+                GuildId = "10000000000000002",
+                ChannelId = "10000000000000003"
+            },
+            Relay = new RelayOptions { DatabasePath = databasePath }
+        };
+        await using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<SapphireAvenueOptions>();
+                services.RemoveAll<RelayStore>();
+                services.AddSingleton(testOptions);
+                services.AddSingleton<RelayStore>();
+            }));
+        using var client = factory.CreateClient();
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+
+        string BridgePayload(string id, string permissions, string guildId, string applicationId, object subcommand) =>
+            JsonSerializer.Serialize(new
+            {
+                id,
+                application_id = applicationId,
+                type = 2,
+                guild_id = guildId,
+                channel_id = "10000000000000003",
+                member = new
+                {
+                    permissions,
+                    roles = Array.Empty<string>(),
+                    user = new { id = "10000000000000005", username = "manager" }
+                },
+                data = new { name = "bridge", options = new[] { subcommand } }
+            });
+
+        var configure = BridgePayload(
+            "10000000000000201", "32", "10000000000000002", "10000000000000001",
+            new
+            {
+                name = "configure",
+                type = 1,
+                options = new object[]
+                {
+                    new { name = "channel", type = 7, value = "10000000000000003" },
+                    new { name = "role", type = 8, value = "10000000000000007" }
+                }
+            });
+        using var configured = await PostSignedAsync(client, configure, timestamp, expandedPrivateKey);
+        using var replay = await PostSignedAsync(client, configure, timestamp, expandedPrivateKey);
+        Assert.True(configured.IsSuccessStatusCode);
+        Assert.True(replay.IsSuccessStatusCode);
+        var stored = await factory.Services.GetRequiredService<RelayStore>()
+            .GetCommunityConfigurationAsync("10000000000000002");
+        Assert.Equal(2, stored!.Revision);
+        Assert.Equal("10000000000000007", stored.AllowedRoleId);
+
+        var forbidden = BridgePayload(
+            "10000000000000202", "0", "10000000000000002", "10000000000000001",
+            new { name = "status", type = 1 });
+        using var forbiddenResponse = await PostSignedAsync(client, forbidden, timestamp, expandedPrivateKey);
+        Assert.Contains("Manage Server", await forbiddenResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var wrongGuild = BridgePayload(
+            "10000000000000203", "32", "10000000000000999", "10000000000000001",
+            new { name = "status", type = 1 });
+        using var wrongGuildResponse = await PostSignedAsync(client, wrongGuild, timestamp, expandedPrivateKey);
+        Assert.Contains("not connected", await wrongGuildResponse.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var wrongApplication = BridgePayload(
+            "10000000000000204", "32", "10000000000000002", "10000000000000999",
+            new { name = "status", type = 1 });
+        using var wrongApplicationResponse = await PostSignedAsync(client, wrongApplication, timestamp, expandedPrivateKey);
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongApplicationResponse.StatusCode);
+
+        var cwls = JsonSerializer.Serialize(new
+        {
+            id = "10000000000000205",
+            application_id = "10000000000000001",
+            type = 2,
+            guild_id = "10000000000000002",
+            channel_id = "10000000000000003",
+            member = new
+            {
+                roles = new[] { "10000000000000007" },
+                user = new { id = "10000000000000008", username = "affiliate" }
+            },
+            data = new
+            {
+                name = "cwls",
+                options = new[] { new { name = "message", value = "Hello CWLS" } }
+            }
+        });
+        using var allowedCwls = await PostSignedAsync(client, cwls, timestamp, expandedPrivateKey);
+        Assert.Contains("Queued", await allowedCwls.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+
+        var pause = BridgePayload(
+            "10000000000000206", "32", "10000000000000002", "10000000000000001",
+            new
+            {
+                name = "pause",
+                type = 1,
+                options = new[] { new { name = "paused", type = 5, value = true } }
+            });
+        using var paused = await PostSignedAsync(client, pause, timestamp, expandedPrivateKey);
+        Assert.Contains("paused", await paused.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+        var pausedCwlsPayload = cwls.Replace("10000000000000205", "10000000000000207", StringComparison.Ordinal);
+        using var pausedCwls = await PostSignedAsync(client, pausedCwlsPayload, timestamp, expandedPrivateKey);
+        Assert.Contains("paused", await pausedCwls.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
 
         await factory.DisposeAsync();
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();

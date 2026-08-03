@@ -5,6 +5,7 @@ using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using Dalamud.Utility;
 using ECommons.Automation;
+using Franthropy.Dalamud.AgentBridge;
 using Franthropy.Dalamud.Persistence;
 
 namespace SapphireAvenueRelay;
@@ -29,9 +30,12 @@ internal sealed class CwlsRelayWorker : IDisposable
     private readonly Task loop;
     private TaskCompletionSource<bool>? pendingEcho;
     private string? pendingEchoText;
+    private int? pendingEchoSlot;
+    private string? pendingEchoCwlsName;
     private PendingSendSnapshot? pendingSend;
     private bool coordinatorReachable;
     private string role = "offline";
+    private bool isPreferred;
     private long epoch;
     private DateTimeOffset? leaseExpiresAtUtc;
     private string? lastError;
@@ -68,6 +72,7 @@ internal sealed class CwlsRelayWorker : IDisposable
         var slots = CwlsStateReader.ReadSlots();
         var actualName = slots.FirstOrDefault(value => value.Slot == configuration.CwlsSlot)?.Name;
         var slotMatches = IsExactSlotMatch(actualName);
+        var sendEligibility = EvaluateLocalSendEligibility(requireDirection: true, slots);
         var player = objectTable.LocalPlayer;
         lock (gate)
         {
@@ -82,14 +87,100 @@ internal sealed class CwlsRelayWorker : IDisposable
                 slotMatches,
                 configuration.ObserveToDiscordEnabled,
                 configuration.DiscordToGameEnabled,
-                IsCoordinatorConfigured(),
+                sendEligibility.Allowed,
+                RelayConfigurationPolicy.IsCoordinatorConfigured(configuration),
                 coordinatorReachable,
                 role,
+                isPreferred,
                 epoch,
                 leaseExpiresAtUtc,
                 observations.Count,
                 pendingSend,
                 lastError);
+        }
+    }
+
+    public Task<PairNodeResponse> PairAsync(
+        string coordinatorBaseUrl,
+        string pairingCode,
+        CancellationToken cancellationToken) =>
+        coordinator.PairAsync(coordinatorBaseUrl, pairingCode, cancellationToken);
+
+    public void ApplyPairing(string coordinatorBaseUrl, PairNodeResponse pairing)
+    {
+        var coordinatorUri = RelayCoordinatorClient.ValidateBaseUri(coordinatorBaseUrl);
+        if (!RelayConfigurationPolicy.IsNodeIdValid(pairing.NodeId) ||
+            !RelayConfigurationPolicy.IsNodeLabelValid(pairing.NodeLabel) ||
+            !RelayConfigurationPolicy.IsAccessTokenValid(pairing.AccessToken))
+        {
+            throw new InvalidOperationException("The coordinator returned an invalid node identity or credential.");
+        }
+
+        var protectedToken = AgentBridgeDataProtection.ProtectToken(
+            pairing.AccessToken,
+            configuration.PluginInstanceId + ":relay");
+        lock (gate)
+        {
+            configuration.ObserveToDiscordEnabled = false;
+            configuration.DiscordToGameEnabled = false;
+            configuration.CoordinatorBaseUrl = coordinatorUri.AbsoluteUri;
+            configuration.NodeId = pairing.NodeId;
+            configuration.NodeLabel = pairing.NodeLabel.Trim();
+            configuration.RelayProtectedAccessToken = protectedToken;
+            SetDisabledUnsafe();
+            configuration.Save(pluginInterface);
+        }
+    }
+
+    public string? SelectCwls(CwlsSlotSnapshot selection)
+    {
+        var discovered = CwlsStateReader.ReadSlots();
+        if (RelayConfigurationPolicy.ResolveSelection(discovered, selection.Slot, selection.Name) is null)
+            return "That cross-world linkshell is no longer available. Open the list and select it again.";
+
+        lock (gate)
+        {
+            configuration.CwlsSlot = selection.Slot;
+            configuration.ExpectedCwlsName = selection.Name;
+            lastError = null;
+            configuration.Save(pluginInterface);
+        }
+
+        return null;
+    }
+
+    public string? SetDirections(bool observeToDiscord, bool discordToGame)
+    {
+        var snapshot = CreateSnapshot();
+        if ((observeToDiscord || discordToGame) && (!snapshot.SlotMatches || !snapshot.CoordinatorConfigured))
+            return "Pair this installation and select the exact current CWLS before enabling relay participation.";
+
+        lock (gate)
+        {
+            configuration.ObserveToDiscordEnabled = observeToDiscord;
+            configuration.DiscordToGameEnabled = discordToGame;
+            if (!observeToDiscord && !discordToGame)
+                SetDisabledUnsafe();
+            configuration.Save(pluginInterface);
+        }
+
+        return null;
+    }
+
+    public void ClearConfiguration()
+    {
+        lock (gate)
+        {
+            configuration.ObserveToDiscordEnabled = false;
+            configuration.DiscordToGameEnabled = false;
+            configuration.CoordinatorBaseUrl = string.Empty;
+            configuration.NodeId = string.Empty;
+            configuration.NodeLabel = string.Empty;
+            configuration.RelayProtectedAccessToken = string.Empty;
+            configuration.CwlsSlot = 0;
+            configuration.ExpectedCwlsName = string.Empty;
+            SetDisabledUnsafe();
+            configuration.Save(pluginInterface);
         }
     }
 
@@ -100,7 +191,9 @@ internal sealed class CwlsRelayWorker : IDisposable
         await sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var eligibility = await framework.RunOnTick(GetEligibility, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var eligibility = await framework.RunOnTick(
+                () => GetEligibility(requireDirection: false),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!eligibility.Allowed)
                 return new RelayTestReceipt(false, "not-sent", eligibility.Reason, null, null);
 
@@ -110,10 +203,16 @@ internal sealed class CwlsRelayWorker : IDisposable
             string detail;
             try
             {
-                outcome = await SendAndConfirmEchoAsync(echoText, "local-test", "local-test", cancellationToken).ConfigureAwait(false);
+                var attempt = await SendAndConfirmEchoAsync(
+                    echoText,
+                    "local-test",
+                    "local-test",
+                    requireDirection: false,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                outcome = attempt.Outcome;
                 detail = outcome == DeliveryOutcome.Sent
                     ? "Matching CWLS echo observed."
-                    : "No authoritative CWLS echo was observed.";
+                    : attempt.Detail;
             }
             catch (ArgumentException exception)
             {
@@ -170,24 +269,34 @@ internal sealed class CwlsRelayWorker : IDisposable
                 {
                     SetDisabled();
                 }
-                else if (!IsCoordinatorConfigured())
+                else if (!RelayConfigurationPolicy.IsCoordinatorConfigured(configuration))
                 {
                     SetDisconnected("Relay coordinator is not configured.");
                 }
                 else
                 {
-                    var heartbeat = await coordinator.HeartbeatAsync(runtimeInstanceId, cancellationToken).ConfigureAwait(false);
+                    var sendEligibility = await framework.RunOnTick(
+                        () => GetEligibility(requireDirection: true),
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    var heartbeat = await coordinator.HeartbeatAsync(
+                        runtimeInstanceId,
+                        sendEligibility.Allowed,
+                        cancellationToken).ConfigureAwait(false);
                     lock (gate)
                     {
                         coordinatorReachable = true;
                         role = heartbeat.Role;
+                        isPreferred = heartbeat.IsPreferred;
                         epoch = heartbeat.Epoch;
                         leaseExpiresAtUtc = heartbeat.ExpiresAtUtc;
                         lastError = null;
+                        if (configuration.DiscordToGameEnabled && !sendEligibility.Allowed)
+                            lastError = sendEligibility.Reason;
                     }
 
                     await FlushObservationsAsync(cancellationToken).ConfigureAwait(false);
                     if (configuration.DiscordToGameEnabled &&
+                        sendEligibility.Allowed &&
                         string.Equals(heartbeat.Role, "leader", StringComparison.OrdinalIgnoreCase))
                     {
                         await ClaimAndSendAsync(heartbeat.Epoch, cancellationToken).ConfigureAwait(false);
@@ -235,7 +344,9 @@ internal sealed class CwlsRelayWorker : IDisposable
         await sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var eligibility = await framework.RunOnTick(GetEligibility, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var eligibility = await framework.RunOnTick(
+                () => GetEligibility(requireDirection: true),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!eligibility.Allowed)
             {
                 lock (gate) lastError = eligibility.Reason;
@@ -250,11 +361,17 @@ internal sealed class CwlsRelayWorker : IDisposable
             try
             {
                 var echoText = CwlsChannels.FormatDiscordLine(message.DiscordDisplayName, message.Content);
-                outcome = await SendAndConfirmEchoAsync(
+                var attempt = await SendAndConfirmEchoAsync(
                     echoText,
                     message.MessageId,
                     message.ClaimId,
-                    cancellationToken).ConfigureAwait(false);
+                    requireDirection: true,
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                outcome = attempt.Outcome;
+                if (outcome != DeliveryOutcome.Sent)
+                {
+                    lock (gate) lastError = attempt.Detail;
+                }
             }
             catch (ArgumentException exception)
             {
@@ -288,10 +405,11 @@ internal sealed class CwlsRelayWorker : IDisposable
         }
     }
 
-    private async Task<DeliveryOutcome> SendAndConfirmEchoAsync(
+    private async Task<SendAttemptResult> SendAndConfirmEchoAsync(
         string echoText,
         string messageId,
         string claimId,
+        bool requireDirection,
         CancellationToken cancellationToken)
     {
         var echo = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -304,19 +422,24 @@ internal sealed class CwlsRelayWorker : IDisposable
 
         try
         {
-            await framework.RunOnTick(
-                () => Chat.SendMessage($"/cwl{configuration.CwlsSlot} {echoText}"),
+            var submission = await framework.RunOnTick(
+                () => SubmitIfEligible(echoText, requireDirection),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!submission.Submitted)
+                return new SendAttemptResult(DeliveryOutcome.NotSent, submission.Detail);
+
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(10));
             try
             {
                 await echo.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-                return DeliveryOutcome.Sent;
+                return new SendAttemptResult(DeliveryOutcome.Sent, "Matching CWLS echo observed.");
             }
             catch (OperationCanceledException)
             {
-                return DeliveryOutcome.Ambiguous;
+                return new SendAttemptResult(
+                    DeliveryOutcome.Ambiguous,
+                    "The message was submitted, but no authoritative CWLS echo was observed.");
             }
         }
         finally
@@ -327,21 +450,40 @@ internal sealed class CwlsRelayWorker : IDisposable
                 {
                     pendingEcho = null;
                     pendingEchoText = null;
+                    pendingEchoSlot = null;
+                    pendingEchoCwlsName = null;
                     pendingSend = null;
                 }
             }
         }
     }
 
+    private SendSubmission SubmitIfEligible(string echoText, bool requireDirection)
+    {
+        var eligibility = GetEligibility(requireDirection);
+        if (!eligibility.Allowed ||
+            eligibility.VerifiedSlot is not { } verifiedSlot ||
+            eligibility.VerifiedName is not { } verifiedName)
+            return new SendSubmission(false, eligibility.Reason);
+
+        // The game state, exact slot/name check, captured slot, and submit all occur in this
+        // one framework callback. Mutable configuration is never read after verification.
+        lock (gate)
+        {
+            pendingEchoSlot = verifiedSlot;
+            pendingEchoCwlsName = verifiedName;
+        }
+        Chat.SendMessage($"/cwl{verifiedSlot} {echoText}");
+        return new SendSubmission(true, "Message submitted; waiting for the authoritative CWLS echo.");
+    }
+
     private void OnChatMessage(IHandleableChatMessage chatMessage)
     {
         var slot = CwlsChannels.ToSlot(chatMessage.LogKind);
-        if (slot is null || slot.Value != configuration.CwlsSlot)
+        if (slot is null)
             return;
 
         var actualName = CwlsStateReader.ReadSlots().FirstOrDefault(value => value.Slot == slot.Value)?.Name;
-        if (!IsExactSlotMatch(actualName))
-            return;
 
         var senderBytes = chatMessage.OriginalSender.Data.ToArray();
         var messageBytes = chatMessage.OriginalMessage.Data.ToArray();
@@ -357,13 +499,17 @@ internal sealed class CwlsRelayWorker : IDisposable
         lock (gate)
         {
             if (pendingEcho is not null &&
+                pendingEchoSlot == slot.Value &&
+                string.Equals(pendingEchoCwlsName, actualName, StringComparison.Ordinal) &&
                 string.Equals(pendingEchoText, content, StringComparison.Ordinal) &&
                 IsLocalPlayer(senderName))
             {
                 echo = pendingEcho;
             }
 
-            if (configuration.ObserveToDiscordEnabled)
+            if (configuration.ObserveToDiscordEnabled &&
+                slot.Value == configuration.CwlsSlot &&
+                IsExactSlotMatch(actualName))
             {
                 var observedAt = chatMessage.Timestamp > 0
                     ? DateTimeOffset.FromUnixTimeSeconds(chatMessage.Timestamp)
@@ -393,17 +539,20 @@ internal sealed class CwlsRelayWorker : IDisposable
         echo?.TrySetResult(true);
     }
 
-    private Eligibility GetEligibility()
-    {
-        if (!clientState.IsLoggedIn || objectTable.LocalPlayer is null)
-            return new Eligibility(false, "No logged-in local character is available.");
-        if (configuration.CwlsSlot is < 1 or > 8 || string.IsNullOrWhiteSpace(configuration.ExpectedCwlsName))
-            return new Eligibility(false, "An explicit CWLS slot and expected name are required.");
-        var actualName = CwlsStateReader.ReadSlots().FirstOrDefault(value => value.Slot == configuration.CwlsSlot)?.Name;
-        return IsExactSlotMatch(actualName)
-            ? new Eligibility(true, "CWLS slot verified.")
-            : new Eligibility(false, $"CWLS slot {configuration.CwlsSlot} is '{actualName ?? "unavailable"}', not '{configuration.ExpectedCwlsName}'.");
-    }
+    private RelaySendEligibility GetEligibility(bool requireDirection) =>
+        EvaluateLocalSendEligibility(requireDirection, CwlsStateReader.ReadSlots());
+
+    private RelaySendEligibility EvaluateLocalSendEligibility(
+        bool requireDirection,
+        IReadOnlyList<CwlsSlotSnapshot> discoveredSlots) =>
+        RelayConfigurationPolicy.EvaluateSendEligibility(
+            requireDirection,
+            configuration.DiscordToGameEnabled,
+            clientState.IsLoggedIn,
+            objectTable.LocalPlayer is not null,
+            configuration.CwlsSlot,
+            configuration.ExpectedCwlsName,
+            discoveredSlots);
 
     private bool IsExactSlotMatch(string? actualName) =>
         !string.IsNullOrWhiteSpace(actualName) &&
@@ -411,21 +560,6 @@ internal sealed class CwlsRelayWorker : IDisposable
 
     private bool IsLocalPlayer(string senderName) =>
         string.Equals(objectTable.LocalPlayer?.Name.TextValue, senderName, StringComparison.Ordinal);
-
-    private bool IsCoordinatorConfigured()
-    {
-        try
-        {
-            _ = RelayCoordinatorClient.ValidateBaseUri(configuration.CoordinatorBaseUrl);
-            return configuration.NodeId.Length is > 0 and <= 64 &&
-                   configuration.NodeId.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or ':') &&
-                   !string.IsNullOrWhiteSpace(configuration.RelayProtectedAccessToken);
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
-    }
 
     private List<ObservationEnvelope> LoadOutbox()
     {
@@ -464,6 +598,7 @@ internal sealed class CwlsRelayWorker : IDisposable
         {
             coordinatorReachable = false;
             role = "offline";
+            isPreferred = false;
             leaseExpiresAtUtc = null;
             lastError = error;
         }
@@ -472,13 +607,17 @@ internal sealed class CwlsRelayWorker : IDisposable
     private void SetDisabled()
     {
         lock (gate)
-        {
-            coordinatorReachable = false;
-            role = "disabled";
-            epoch = 0;
-            leaseExpiresAtUtc = null;
-            lastError = null;
-        }
+            SetDisabledUnsafe();
+    }
+
+    private void SetDisabledUnsafe()
+    {
+        coordinatorReachable = false;
+        role = "disabled";
+        isPreferred = false;
+        epoch = 0;
+        leaseExpiresAtUtc = null;
+        lastError = null;
     }
 
     private static string ToWireName(DeliveryOutcome outcome) => outcome switch
@@ -488,7 +627,8 @@ internal sealed class CwlsRelayWorker : IDisposable
         _ => "ambiguous",
     };
 
-    private sealed record Eligibility(bool Allowed, string Reason);
+    private sealed record SendSubmission(bool Submitted, string Detail);
+    private sealed record SendAttemptResult(DeliveryOutcome Outcome, string Detail);
 }
 
 internal sealed record RelayTestReceipt(

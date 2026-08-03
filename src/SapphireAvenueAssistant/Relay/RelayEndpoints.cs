@@ -4,6 +4,34 @@ public static class RelayEndpoints
 {
     public static IEndpointRouteBuilder MapRelayEndpoints(this IEndpointRouteBuilder endpoints)
     {
+        endpoints.MapPost(
+            "/relay/v1/pair",
+            async Task<IResult> (
+                PairingRequest body,
+                HttpRequest request,
+                RelayStore store,
+                TimeProvider timeProvider,
+                CancellationToken cancellationToken) =>
+            {
+                if (!IsSecurePairingTransport(request))
+                {
+                    return Results.BadRequest(new { error = "Node pairing requires HTTPS." });
+                }
+
+                var result = await store.ExchangePairingCodeAsync(
+                    body.PairingCode,
+                    timeProvider.GetUtcNow(),
+                    cancellationToken);
+                return result is null
+                    ? Results.Unauthorized()
+                    : Results.Ok(new
+                    {
+                        result.NodeId,
+                        result.NodeLabel,
+                        result.AccessToken
+                    });
+            });
+
         var group = endpoints.MapGroup("/relay/v1/nodes/{nodeId}");
 
         group.MapPost(
@@ -14,10 +42,11 @@ public static class RelayEndpoints
                 HttpRequest request,
                 RelayAuthenticator authenticator,
                 RelayStore store,
+                Configuration.SapphireAvenueOptions options,
                 TimeProvider timeProvider,
                 CancellationToken cancellationToken) =>
             {
-                if (!authenticator.Authorize(request, nodeId))
+                if (!await authenticator.AuthorizeAsync(request, nodeId, cancellationToken))
                 {
                     return Results.Unauthorized();
                 }
@@ -31,10 +60,18 @@ public static class RelayEndpoints
                     nodeId,
                     body.InstanceId,
                     timeProvider.GetUtcNow(),
-                    cancellationToken);
+                    canSendToGame: body.CanSendToGame,
+                    allowLegacyHeartbeatWithoutCapability: options.Relay.AllowLegacyHeartbeatWithoutCapability,
+                    cancellationToken: cancellationToken);
+                if (!lease.Authorized)
+                {
+                    return Results.Unauthorized();
+                }
+
                 return Results.Ok(new
                 {
                     role = lease.IsLeader ? "leader" : "observer",
+                    lease.IsPreferred,
                     lease.Epoch,
                     lease.ExpiresAtUtc
                 });
@@ -51,7 +88,7 @@ public static class RelayEndpoints
                 TimeProvider timeProvider,
                 CancellationToken cancellationToken) =>
             {
-                if (!authenticator.Authorize(request, nodeId))
+                if (!await authenticator.AuthorizeAsync(request, nodeId, cancellationToken))
                 {
                     return Results.Unauthorized();
                 }
@@ -67,6 +104,11 @@ public static class RelayEndpoints
                     body.Epoch,
                     timeProvider.GetUtcNow(),
                     cancellationToken);
+                if (!claim.NodeActive)
+                {
+                    return Results.Unauthorized();
+                }
+
                 if (!claim.Authorized)
                 {
                     return Results.Conflict(new { error = "The node does not hold the current send lease." });
@@ -87,7 +129,7 @@ public static class RelayEndpoints
                 TimeProvider timeProvider,
                 CancellationToken cancellationToken) =>
             {
-                if (!authenticator.Authorize(request, nodeId))
+                if (!await authenticator.AuthorizeAsync(request, nodeId, cancellationToken))
                 {
                     return Results.Unauthorized();
                 }
@@ -107,9 +149,12 @@ public static class RelayEndpoints
                     body.Outcome,
                     timeProvider.GetUtcNow(),
                     cancellationToken);
-                return completed
-                    ? Results.NoContent()
-                    : Results.Conflict(new { error = "The claim is stale, mismatched, or already completed." });
+                return completed switch
+                {
+                    NodeMutationResult.Completed => Results.NoContent(),
+                    NodeMutationResult.Unauthorized => Results.Unauthorized(),
+                    _ => Results.Conflict(new { error = "The claim is stale, mismatched, or already completed." })
+                };
             });
 
         group.MapPost(
@@ -124,7 +169,7 @@ public static class RelayEndpoints
                 TimeProvider timeProvider,
                 CancellationToken cancellationToken) =>
             {
-                if (!authenticator.Authorize(request, nodeId))
+                if (!await authenticator.AuthorizeAsync(request, nodeId, cancellationToken))
                 {
                     return Results.Unauthorized();
                 }
@@ -149,10 +194,30 @@ public static class RelayEndpoints
                         body.ObservedAtUtc),
                     timeProvider.GetUtcNow(),
                     cancellationToken);
+                if (!result.Authorized)
+                {
+                    return Results.Unauthorized();
+                }
+
                 return Results.Ok(new { accepted = true, duplicate = !result.Inserted });
             });
 
         return endpoints;
+    }
+
+    public static bool IsSecurePairingTransport(HttpRequest request)
+    {
+        if (request.IsHttps)
+        {
+            return true;
+        }
+
+        var remoteAddress = request.HttpContext.Connection.RemoteIpAddress;
+        return remoteAddress is not null &&
+            System.Net.IPAddress.IsLoopback(remoteAddress) &&
+            request.Headers.TryGetValue("X-Forwarded-Proto", out var forwardedProto) &&
+            forwardedProto.Count == 1 &&
+            string.Equals(forwardedProto[0], "https", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsIdentifier(string? value, int maximumLength = 64) =>
@@ -161,7 +226,9 @@ public static class RelayEndpoints
         value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or ':');
 }
 
-public sealed record HeartbeatRequest(string InstanceId);
+public sealed record HeartbeatRequest(string InstanceId, bool? CanSendToGame);
+
+public sealed record PairingRequest(string PairingCode);
 
 public sealed record ClaimRequest(string InstanceId, long Epoch);
 

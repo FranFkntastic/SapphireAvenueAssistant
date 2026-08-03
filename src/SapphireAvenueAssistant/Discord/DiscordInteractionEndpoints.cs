@@ -62,16 +62,14 @@ public static class DiscordInteractionEndpoints
                         !TryGetString(root, "guild_id", out var guildId) ||
                         !TryGetString(root, "channel_id", out var channelId) ||
                         !root.TryGetProperty("data", out var data) ||
-                        !TryGetString(data, "name", out var commandName) ||
-                        !string.Equals(commandName, options.Discord.CommandName, StringComparison.Ordinal))
+                        !TryGetString(data, "name", out var commandName))
                     {
                         return InteractionError("Unsupported interaction.");
                     }
 
-                    if (!string.Equals(guildId, options.Discord.GuildId, StringComparison.Ordinal) ||
-                        !string.Equals(channelId, options.Discord.ChannelId, StringComparison.Ordinal))
+                    if (!string.Equals(guildId, options.Discord.GuildId, StringComparison.Ordinal))
                     {
-                        return InteractionError("Use this command in the configured CWLS relay channel.");
+                        return InteractionError("This Discord server is not connected to this relay.");
                     }
 
                     if (!TryReadMember(root, out var userId, out var displayName, out var roles) ||
@@ -80,10 +78,28 @@ public static class DiscordInteractionEndpoints
                         return InteractionError("A server member identity is required.");
                     }
 
-                    if (options.Discord.AllowedRoleIds.Length > 0 &&
-                        !roles.Any(role => options.Discord.AllowedRoleIds.Contains(role, StringComparer.Ordinal)))
+                    if (string.Equals(commandName, "bridge", StringComparison.Ordinal))
                     {
-                        return InteractionError("You are not allowed to relay messages to this CWLS.");
+                        if (!HasManageGuildPermission(root))
+                        {
+                            return InteractionError("Manage Server permission is required for bridge management.");
+                        }
+
+                        if (!TryReadBridgeRequest(data, interactionId, guildId, userId, out var managementRequest))
+                        {
+                            return InteractionError("Unsupported or incomplete bridge management command.");
+                        }
+
+                        var result = await store.ApplyBridgeManagementAsync(
+                            managementRequest,
+                            timeProvider.GetUtcNow(),
+                            cancellationToken);
+                        return InteractionResponse(result.Response);
+                    }
+
+                    if (!string.Equals(commandName, options.Discord.CommandName, StringComparison.Ordinal))
+                    {
+                        return InteractionError("Unsupported interaction.");
                     }
 
                     var rawMessage = ReadCommandMessage(data);
@@ -94,33 +110,38 @@ public static class DiscordInteractionEndpoints
                         return InteractionError("Provide a non-empty message within the relay limit.");
                     }
 
-                    await store.EnqueueOutboundAsync(
+                    var enqueue = await store.EnqueueAuthorizedOutboundAsync(
+                        guildId,
+                        channelId,
+                        roles,
                         interactionId,
                         userId,
                         normalizedDisplayName,
                         message,
                         timeProvider.GetUtcNow(),
                         cancellationToken);
-                    return Results.Json(new
+                    if (enqueue.Refusal != CwlsEnqueueRefusal.None)
                     {
-                        type = 4,
-                        data = new
+                        return InteractionError(enqueue.Refusal switch
                         {
-                            content = "Queued for the CWLS. The relayed game echo will appear in this channel.",
-                            flags = EphemeralFlag,
-                            allowed_mentions = new
-                            {
-                                parse = Array.Empty<string>()
-                            }
-                        }
-                    });
+                            CwlsEnqueueRefusal.NotConfigured => "The CWLS relay has not been configured.",
+                            CwlsEnqueueRefusal.Paused => "The CWLS relay is paused.",
+                            CwlsEnqueueRefusal.WrongChannel => "Use this command in the configured CWLS relay channel.",
+                            CwlsEnqueueRefusal.RoleRequired => "You are not allowed to relay messages to this CWLS.",
+                            _ => "The CWLS relay refused this message."
+                        });
+                    }
+
+                    return InteractionResponse("Queued for the CWLS. The relayed game echo will appear in this channel.");
                 }
             });
 
         return endpoints;
     }
 
-    private static IResult InteractionError(string message) =>
+    private static IResult InteractionError(string message) => InteractionResponse(message);
+
+    private static IResult InteractionResponse(string message) =>
         Results.Json(new
         {
             type = 4,
@@ -134,6 +155,106 @@ public static class DiscordInteractionEndpoints
                 }
             }
         });
+
+    private static bool HasManageGuildPermission(JsonElement root)
+    {
+        const ulong administrator = 1UL << 3;
+        const ulong manageGuild = 1UL << 5;
+        return root.TryGetProperty("member", out var member) &&
+            TryGetString(member, "permissions", out var rawPermissions) &&
+            ulong.TryParse(rawPermissions, out var permissions) &&
+            (permissions & (administrator | manageGuild)) != 0;
+    }
+
+    private static bool TryReadBridgeRequest(
+        JsonElement data,
+        string interactionId,
+        string guildId,
+        string actorUserId,
+        out BridgeManagementRequest request)
+    {
+        request = default!;
+        if (!data.TryGetProperty("options", out var options) ||
+            options.ValueKind != JsonValueKind.Array ||
+            options.GetArrayLength() != 1)
+        {
+            return false;
+        }
+
+        var subcommand = options[0];
+        if (!TryGetString(subcommand, "name", out var name))
+        {
+            return false;
+        }
+
+        request = name switch
+        {
+            "status" => New(BridgeManagementAction.Status),
+            "list-nodes" => New(BridgeManagementAction.ListNodes),
+            "clear-preference" => New(BridgeManagementAction.ClearPreference),
+            "configure" when TryReadOption(subcommand, "channel", out var channelId) &&
+                TryReadOption(subcommand, "role", out var roleId) =>
+                New(BridgeManagementAction.Configure) with { ChannelId = channelId, RoleId = roleId },
+            "channel" when TryReadOption(subcommand, "channel", out var channelId) =>
+                New(BridgeManagementAction.SetChannel) with { ChannelId = channelId },
+            "role" when TryReadOption(subcommand, "role", out var roleId) =>
+                New(BridgeManagementAction.SetRole) with { RoleId = roleId },
+            "pause" when TryReadBooleanOption(subcommand, "paused", out var paused) =>
+                New(paused ? BridgeManagementAction.Pause : BridgeManagementAction.Resume),
+            "add-node" when TryReadOption(subcommand, "name", out var nodeLabel) =>
+                New(BridgeManagementAction.AddNode) with { NodeLabel = nodeLabel },
+            "prefer-node" when TryReadOption(subcommand, "node", out var preferredNode) =>
+                New(BridgeManagementAction.PreferNode) with { NodeId = preferredNode },
+            "revoke-node" when TryReadOption(subcommand, "node", out var revokedNode) =>
+                New(BridgeManagementAction.RevokeNode) with { NodeId = revokedNode },
+            _ => default!
+        };
+        return request is not null;
+
+        BridgeManagementRequest New(BridgeManagementAction action) =>
+            new(interactionId, guildId, actorUserId, action);
+    }
+
+    private static bool TryReadOption(JsonElement subcommand, string optionName, out string value)
+    {
+        value = string.Empty;
+        if (!subcommand.TryGetProperty("options", out var options) || options.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var option in options.EnumerateArray())
+        {
+            if (TryGetString(option, "name", out var name) && name == optionName &&
+                TryGetString(option, "value", out value))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryReadBooleanOption(JsonElement subcommand, string optionName, out bool value)
+    {
+        value = false;
+        if (!subcommand.TryGetProperty("options", out var options) || options.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var option in options.EnumerateArray())
+        {
+            if (TryGetString(option, "name", out var name) && name == optionName &&
+                option.TryGetProperty("value", out var raw) && raw.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                value = raw.GetBoolean();
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     private static bool TryGetString(JsonElement element, string name, out string value)
     {
