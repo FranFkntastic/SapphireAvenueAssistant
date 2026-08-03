@@ -26,10 +26,14 @@ public sealed class DiscordOptions
     public bool CanVerifyInteractions =>
         PublicKey.Length == 64 && PublicKey.All(Uri.IsHexDigit) &&
         IsSnowflake(ApplicationId) &&
-        IsSnowflake(GuildId) &&
-        IsSnowflake(ChannelId);
+        IsSnowflake(GuildId);
 
     public bool CanPublish => CanVerifyInteractions && !string.IsNullOrWhiteSpace(BotToken);
+
+    public bool CanRegisterCommands =>
+        IsSnowflake(ApplicationId) &&
+        IsSnowflake(GuildId) &&
+        !string.IsNullOrWhiteSpace(BotToken);
 
     public static bool IsSnowflake(string value) =>
         value.Length is >= 17 and <= 20 && value.All(char.IsAsciiDigit);
@@ -46,6 +50,8 @@ public sealed class RelayOptions
     public int PublishLeaseSeconds { get; init; } = 30;
 
     public int MaximumMessageBytes { get; init; } = 400;
+
+    public bool AllowLegacyHeartbeatWithoutCapability { get; init; } = true;
 
     public Dictionary<string, string> NodeTokens { get; init; } = new(StringComparer.Ordinal);
 

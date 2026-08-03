@@ -20,13 +20,28 @@ public sealed class DiscordInboundPublisher(
                 continue;
             }
 
-            var workItem = await store.ClaimDiscordPublishAsync(timeProvider.GetUtcNow(), stoppingToken);
+            var workItem = await store.ClaimDiscordPublishAsync(
+                options.Discord.GuildId,
+                timeProvider.GetUtcNow(),
+                stoppingToken);
             if (workItem is null)
             {
                 await Task.Delay(TimeSpan.FromSeconds(1), timeProvider, stoppingToken);
                 continue;
             }
 
+            var route = await store.ConfirmDiscordPublishRouteAsync(
+                options.Discord.GuildId,
+                workItem,
+                timeProvider.GetUtcNow(),
+                stoppingToken);
+            if (route != DiscordPublishRouteCheck.Current)
+            {
+                continue;
+            }
+
+            // Once the external POST starts, its outcome is bound to this claimed revision.
+            // A later configuration change must not silently redirect or blindly retry it.
             var result = await discord.PublishObservationAsync(workItem, stoppingToken);
             var (state, retryAfter) = result.Outcome switch
             {

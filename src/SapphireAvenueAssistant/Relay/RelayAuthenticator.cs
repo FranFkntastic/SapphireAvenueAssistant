@@ -1,16 +1,13 @@
-using System.Security.Cryptography;
-using System.Text;
-using SapphireAvenueAssistant.Configuration;
-
 namespace SapphireAvenueAssistant.Relay;
 
-public sealed class RelayAuthenticator(SapphireAvenueOptions options)
+public sealed class RelayAuthenticator(RelayStore store)
 {
-    public bool Authorize(HttpRequest request, string nodeId)
+    public async Task<bool> AuthorizeAsync(
+        HttpRequest request,
+        string nodeId,
+        CancellationToken cancellationToken = default)
     {
-        if (!options.Relay.NodeTokens.TryGetValue(nodeId, out var expected) ||
-            string.IsNullOrWhiteSpace(expected) ||
-            !request.Headers.TryGetValue("Authorization", out var authorization))
+        if (!request.Headers.TryGetValue("Authorization", out var authorization))
         {
             return false;
         }
@@ -22,9 +19,8 @@ public sealed class RelayAuthenticator(SapphireAvenueOptions options)
             return false;
         }
 
-        var actualBytes = Encoding.UTF8.GetBytes(header[prefix.Length..]);
-        var expectedBytes = Encoding.UTF8.GetBytes(expected);
-        return actualBytes.Length == expectedBytes.Length &&
-            CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
+        var token = header[prefix.Length..];
+        return !string.IsNullOrWhiteSpace(token) &&
+            await store.AuthorizeNodeAsync(nodeId, token, cancellationToken);
     }
 }

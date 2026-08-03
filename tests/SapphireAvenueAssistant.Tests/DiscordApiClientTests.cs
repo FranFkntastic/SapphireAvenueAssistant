@@ -76,6 +76,8 @@ public sealed class DiscordApiClientTests
             "cwls1:9ac92af4",
             "publish-claim",
             1,
+            "10000000000000003",
+            1,
             1,
             "Test Friend",
             "Balmung",

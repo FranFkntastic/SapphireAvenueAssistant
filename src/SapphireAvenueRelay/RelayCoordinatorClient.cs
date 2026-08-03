@@ -16,12 +16,50 @@ internal sealed class RelayCoordinatorClient : IDisposable
 
     public RelayCoordinatorClient(RelayConfiguration configuration) => this.configuration = configuration;
 
-    public async Task<HeartbeatResponse> HeartbeatAsync(string instanceId, CancellationToken cancellationToken)
+    public async Task<PairNodeResponse> PairAsync(
+        string coordinatorBaseUrl,
+        string pairingCode,
+        CancellationToken cancellationToken)
+    {
+        var baseUri = ValidatePairingBaseUri(coordinatorBaseUrl);
+        var normalizedCode = RelayConfigurationPolicy.NormalizePairingCode(pairingCode)
+            ?? throw new InvalidOperationException("Pairing code must contain 13 Base32 characters (A-Z and 2-7).");
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(baseUri, "relay/v1/pair"))
+        {
+            Content = JsonContent.Create(new PairNodeRequest(normalizedCode), RelayJsonContext.Default.PairNodeRequest),
+        };
+        using var response = await http.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(await ReadPairingFailureAsync(response, cancellationToken).ConfigureAwait(false));
+
+        var pairing = await response.Content.ReadFromJsonAsync(
+            RelayJsonContext.Default.PairNodeResponse,
+            cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidDataException("The coordinator returned an empty pairing result.");
+        if (!RelayConfigurationPolicy.IsNodeIdValid(pairing.NodeId) ||
+            !RelayConfigurationPolicy.IsNodeLabelValid(pairing.NodeLabel) ||
+            !RelayConfigurationPolicy.IsAccessTokenValid(pairing.AccessToken))
+        {
+            throw new InvalidDataException("The coordinator returned an invalid node identity or credential.");
+        }
+
+        return pairing;
+    }
+
+    public async Task<HeartbeatResponse> HeartbeatAsync(
+        string instanceId,
+        bool canSendToGame,
+        CancellationToken cancellationToken)
     {
         using var response = await SendAsync(
             HttpMethod.Post,
             "heartbeat",
-            JsonContent.Create(new HeartbeatRequest(instanceId), RelayJsonContext.Default.HeartbeatRequest),
+            JsonContent.Create(
+                new HeartbeatRequest(instanceId, canSendToGame),
+                RelayJsonContext.Default.HeartbeatRequest),
             cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync(RelayJsonContext.Default.HeartbeatResponse, cancellationToken).ConfigureAwait(false)
@@ -112,6 +150,52 @@ internal sealed class RelayCoordinatorClient : IDisposable
         if (uri.Scheme != Uri.UriSchemeHttps && !loopbackHttp)
             throw new InvalidOperationException("Coordinator URL must use HTTPS, except for loopback development.");
         return new Uri(uri.AbsoluteUri.TrimEnd('/') + "/", UriKind.Absolute);
+    }
+
+    internal static Uri ValidatePairingBaseUri(string value)
+    {
+        var uri = ValidateBaseUri(value);
+        if (uri.Scheme != Uri.UriSchemeHttps)
+            throw new InvalidOperationException("Node pairing requires HTTPS.");
+        return uri;
+    }
+
+    private static async Task<string> ReadPairingFailureAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            try
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(body);
+                var root = document.RootElement;
+                foreach (var property in new[] { "error", "detail", "title" })
+                {
+                    if (root.TryGetProperty(property, out var value) &&
+                        value.ValueKind == System.Text.Json.JsonValueKind.String &&
+                        !string.IsNullOrWhiteSpace(value.GetString()))
+                    {
+                        return value.GetString()!;
+                    }
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // Fall through to a bounded status-specific message.
+            }
+        }
+
+        return response.StatusCode switch
+        {
+            HttpStatusCode.BadRequest => "The pairing code is invalid.",
+            HttpStatusCode.Unauthorized => "The pairing code is unknown, expired, or already used. Ask a Discord manager for a new code.",
+            HttpStatusCode.NotFound => "The pairing code was not recognized.",
+            HttpStatusCode.Gone => "The pairing code expired. Ask a Discord manager for a new code.",
+            HttpStatusCode.Conflict => "The pairing code was already used. Ask a Discord manager for a new code.",
+            _ => $"The coordinator refused pairing ({(int)response.StatusCode} {response.ReasonPhrase}).",
+        };
     }
 
     private string UnprotectNodeToken()
