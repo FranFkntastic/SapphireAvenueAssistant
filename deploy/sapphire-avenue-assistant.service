@@ -1,0 +1,23 @@
+[Unit]
+Description=Sapphire Avenue Discord-CWLS coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/srv/sapphire-avenue-assistant/current
+EnvironmentFile=/etc/sapphire-avenue-assistant/sapphire-avenue.env
+Environment=ASPNETCORE_URLS=http://127.0.0.1:5130
+ExecStart=/srv/sapphire-avenue-assistant/current/SapphireAvenueAssistant
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/srv/sapphire-avenue-assistant/shared
+
+[Install]
+WantedBy=multi-user.target
