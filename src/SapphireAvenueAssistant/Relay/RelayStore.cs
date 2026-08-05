@@ -799,6 +799,8 @@ public sealed class RelayStore
 
     public async Task<ObservationResult> EnqueueObservationAsync(
         string nodeId,
+        string instanceId,
+        long epoch,
         InboundObservation observation,
         DateTimeOffset receivedAt,
         CancellationToken cancellationToken = default)
@@ -811,7 +813,17 @@ public sealed class RelayStore
             if (!await IsActiveNodeAsync(connection, transaction, nodeId, cancellationToken))
             {
                 transaction.Commit();
-                return new ObservationResult(false, false);
+                return new ObservationResult(false, false, false);
+            }
+
+            var receivedAtMs = receivedAt.ToUnixTimeMilliseconds();
+            var leader = await ReadLeaderAsync(connection, transaction, cancellationToken);
+            if (leader.Epoch != epoch || leader.ExpiresAtMs <= receivedAtMs ||
+                !string.Equals(leader.NodeId, nodeId, StringComparison.Ordinal) ||
+                !string.Equals(leader.InstanceId, instanceId, StringComparison.Ordinal))
+            {
+                transaction.Commit();
+                return new ObservationResult(true, false, false);
             }
 
             await using var insert = connection.CreateCommand();
@@ -845,11 +857,11 @@ public sealed class RelayStore
             insert.Parameters.AddWithValue("$senderWorld", (object?)observation.SenderWorld ?? DBNull.Value);
             insert.Parameters.AddWithValue("$content", observation.Content);
             insert.Parameters.AddWithValue("$observedAt", observation.ObservedAtUtc.ToUnixTimeMilliseconds());
-            insert.Parameters.AddWithValue("$receivedAt", receivedAt.ToUnixTimeMilliseconds());
+            insert.Parameters.AddWithValue("$receivedAt", receivedAtMs);
             insert.Parameters.AddWithValue("$state", (int)PublicationState.Pending);
             var inserted = await insert.ExecuteNonQueryAsync(cancellationToken) == 1;
             transaction.Commit();
-            return new ObservationResult(true, inserted);
+            return new ObservationResult(true, true, inserted);
         }
         finally
         {

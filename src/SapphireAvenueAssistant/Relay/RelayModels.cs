@@ -97,7 +97,7 @@ public sealed record CwlsEnqueueResult(
     string? MessageId = null,
     bool Inserted = false);
 
-public sealed record ObservationResult(bool Authorized, bool Inserted);
+public sealed record ObservationResult(bool NodeActive, bool LeaderAuthorized, bool Inserted);
 
 public enum NodeMutationResult
 {

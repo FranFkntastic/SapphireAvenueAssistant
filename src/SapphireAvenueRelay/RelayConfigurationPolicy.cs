@@ -21,6 +21,24 @@ internal sealed record RelaySendEligibility(
 
 internal static class RelayConfigurationPolicy
 {
+    public static bool MayReportObservation(
+        string role,
+        DateTimeOffset? leaseExpiresAtUtc,
+        DateTimeOffset now) =>
+        string.Equals(role, "leader", StringComparison.OrdinalIgnoreCase) &&
+        leaseExpiresAtUtc > now;
+
+    public static bool MaySubmitObservation(
+        ObservationEnvelope observation,
+        string runtimeInstanceId,
+        long currentEpoch,
+        string role,
+        DateTimeOffset? leaseExpiresAtUtc,
+        DateTimeOffset now) =>
+        MayReportObservation(role, leaseExpiresAtUtc, now) &&
+        string.Equals(observation.InstanceId, runtimeInstanceId, StringComparison.Ordinal) &&
+        observation.Epoch == currentEpoch;
+
     public static string? NormalizePairingCode(string? value) =>
         RelayConnectionBootstrap.NormalizePairingCode(value);
 
@@ -127,7 +145,7 @@ internal static class RelayConfigurationPolicy
                 "Observer · not eligible",
                 snapshot.DiscordToGameEnabled
                     ? "Connected, but local game state isn't currently eligible to send into the game."
-                    : "Connected for game-to-Discord observation; Discord-to-game participation is disabled.");
+                    : "Connected, but this node cannot lead while Discord-to-game participation is disabled.");
         }
 
         if (string.Equals(snapshot.Role, "preferred-active", StringComparison.OrdinalIgnoreCase) ||
@@ -136,11 +154,11 @@ internal static class RelayConfigurationPolicy
             return new RelayNodeDisplay(
                 RelayNodeDisplayState.PreferredActive,
                 "Preferred · active",
-                "This node currently sends Discord messages into the game.");
+                "This node currently owns both relay directions.");
         }
 
         if (string.Equals(snapshot.Role, "leader", StringComparison.OrdinalIgnoreCase))
-            return new RelayNodeDisplay(RelayNodeDisplayState.Active, "Active", "This node currently sends Discord messages into the game.");
+            return new RelayNodeDisplay(RelayNodeDisplayState.Active, "Active", "This node currently owns both relay directions.");
 
         return new RelayNodeDisplay(
             RelayNodeDisplayState.Standby,

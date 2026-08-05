@@ -200,6 +200,7 @@ public static class RelayEndpoints
                 var senderWorld = RelayText.Normalize(body.SenderWorld, 64);
                 var content = RelayText.Normalize(body.Content, options.Relay.BoundedMaximumMessageBytes);
                 if (!IsIdentifier(nodeId) || !IsIdentifier(body.ObservationId, 128) ||
+                    !IsIdentifier(body.InstanceId) || body.Epoch <= 0 ||
                     body.CwlsSlot is < 1 or > 8 || senderName is null || content is null)
                 {
                     return Results.BadRequest(new { error = "Invalid CWLS observation." });
@@ -207,6 +208,8 @@ public static class RelayEndpoints
 
                 var result = await store.EnqueueObservationAsync(
                     nodeId,
+                    body.InstanceId,
+                    body.Epoch,
                     new InboundObservation(
                         body.ObservationId,
                         body.CwlsSlot,
@@ -216,9 +219,14 @@ public static class RelayEndpoints
                         body.ObservedAtUtc),
                     timeProvider.GetUtcNow(),
                     cancellationToken);
-                if (!result.Authorized)
+                if (!result.NodeActive)
                 {
                     return Results.Unauthorized();
+                }
+
+                if (!result.LeaderAuthorized)
+                {
+                    return Results.Conflict(new { error = "Only the current relay leader may report CWLS observations." });
                 }
 
                 return Results.Ok(new { accepted = true, duplicate = !result.Inserted });
@@ -266,6 +274,8 @@ public sealed record CompletionRequest(
     DeliveryOutcome Outcome);
 
 public sealed record ObservationRequest(
+    string InstanceId,
+    long Epoch,
     string ObservationId,
     int CwlsSlot,
     string SenderName,

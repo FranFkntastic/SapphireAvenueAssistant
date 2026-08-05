@@ -63,6 +63,8 @@ Valid outcomes are `sent`, `notSent`, and `ambiguous`. Use `notSent` only when t
 
 ```json
 {
+  "instanceId": "random-per-client-start",
+  "epoch": 42,
   "observationId": "cwls1:stable-event-fingerprint",
   "cwlsSlot": 1,
   "senderName": "Example Person",
@@ -72,6 +74,6 @@ Valid outcomes are `sent`, `notSent`, and `ambiguous`. Use `notSent` only when t
 }
 ```
 
-All relay nodes may report observations. To collapse the same game line seen by several nodes, `observationId` must be a deterministic digest of the authoritative chat event fields available identically to every client—for example CWLS slot, server event timestamp, raw sender payload, and raw message payload. Do not include node identity or local receipt time. Repeating an observation ID is accepted as a duplicate and creates no second Discord publication.
+Only the current relay leader may report observations. The coordinator transactionally verifies the authenticated node, runtime instance, epoch, and unexpired lease before inserting anything; standby, observer, expired, and superseded submissions return `409` and are discarded rather than retained for later replay. Repeating an observation ID from the same current leader is accepted as a duplicate and creates no second Discord publication.
 
 Discord publication always suppresses mentions. A confirmed rate-limit rejection may retry, but a timeout, connection failure, server error, or success without a returned Discord message ID becomes reconciliation-required instead of risking a duplicate channel post.

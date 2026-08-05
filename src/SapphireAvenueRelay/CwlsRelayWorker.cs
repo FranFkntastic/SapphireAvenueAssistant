@@ -361,11 +361,25 @@ internal sealed class CwlsRelayWorker : IDisposable
         while (configuration.ObserveToDiscordEnabled)
         {
             ObservationEnvelope? observation;
-            lock (gate) observation = observations.FirstOrDefault();
+            bool mayReport;
+            lock (gate)
+            {
+                observation = observations.FirstOrDefault();
+                mayReport = observation is not null && RelayConfigurationPolicy.MaySubmitObservation(
+                    observation,
+                    runtimeInstanceId,
+                    epoch,
+                    role,
+                    leaseExpiresAtUtc,
+                    DateTimeOffset.UtcNow);
+            }
             if (observation is null)
                 return;
 
-            await coordinator.PostObservationAsync(observation, cancellationToken).ConfigureAwait(false);
+            if (mayReport)
+            {
+                await coordinator.PostObservationAsync(observation, cancellationToken).ConfigureAwait(false);
+            }
             lock (gate)
             {
                 if (observations.Count > 0 && observations[0].ObservationId == observation.ObservationId)
@@ -547,7 +561,11 @@ internal sealed class CwlsRelayWorker : IDisposable
 
             if (configuration.ObserveToDiscordEnabled &&
                 slot.Value == configuration.CwlsSlot &&
-                IsExactSlotMatch(actualName))
+                IsExactSlotMatch(actualName) &&
+                RelayConfigurationPolicy.MayReportObservation(
+                    role,
+                    leaseExpiresAtUtc,
+                    DateTimeOffset.UtcNow))
             {
                 var observedAt = chatMessage.Timestamp > 0
                     ? DateTimeOffset.FromUnixTimeSeconds(chatMessage.Timestamp)
@@ -558,7 +576,9 @@ internal sealed class CwlsRelayWorker : IDisposable
                     senderName,
                     senderWorld,
                     content,
-                    observedAt);
+                    observedAt,
+                    runtimeInstanceId,
+                    epoch);
                 if (observations.All(item => item.ObservationId != observation.ObservationId))
                 {
                     if (observations.Count >= MaximumOutboxItems)
