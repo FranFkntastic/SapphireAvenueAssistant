@@ -1,3 +1,5 @@
+using SapphireAvenue.BridgeProtocol;
+
 namespace SapphireAvenueRelay;
 
 internal enum RelayNodeDisplayState
@@ -19,20 +21,8 @@ internal sealed record RelaySendEligibility(
 
 internal static class RelayConfigurationPolicy
 {
-    public static string? NormalizePairingCode(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return null;
-
-        var normalized = new string(value
-            .Where(character => !char.IsWhiteSpace(character) && character != '-')
-            .Select(char.ToUpperInvariant)
-            .ToArray());
-        return normalized.Length == 13 &&
-               normalized.All(character => character is >= 'A' and <= 'Z' or >= '2' and <= '7')
-            ? normalized
-            : null;
-    }
+    public static string? NormalizePairingCode(string? value) =>
+        RelayConnectionBootstrap.NormalizePairingCode(value);
 
     public static bool IsNodeIdValid(string? value) =>
         value is { Length: > 0 and <= 64 } &&

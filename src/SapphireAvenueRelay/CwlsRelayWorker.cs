@@ -7,6 +7,7 @@ using Dalamud.Utility;
 using ECommons.Automation;
 using Franthropy.Dalamud.AgentBridge;
 using Franthropy.Dalamud.Persistence;
+using SapphireAvenue.BridgeProtocol;
 
 namespace SapphireAvenueRelay;
 
@@ -110,15 +111,24 @@ internal sealed class CwlsRelayWorker : IDisposable
         }
     }
 
-    public Task<PairNodeResponse> PairAsync(
-        string coordinatorBaseUrl,
-        string pairingCode,
-        CancellationToken cancellationToken) =>
-        coordinator.PairAsync(coordinatorBaseUrl, pairingCode, cancellationToken);
-
-    public void ApplyPairing(string coordinatorBaseUrl, PairNodeResponse pairing)
+    public async Task<RelayPairingResult> PairAsync(
+        string connectionString,
+        CancellationToken cancellationToken)
     {
-        var coordinatorUri = RelayCoordinatorClient.ValidateBaseUri(coordinatorBaseUrl);
+        var bootstrap = RelayConnectionBootstrap.Parse(connectionString);
+        var pairing = await coordinator.PairAsync(
+            bootstrap.CoordinatorBaseUri.AbsoluteUri,
+            bootstrap.PairingCode,
+            cancellationToken).ConfigureAwait(false);
+        return new RelayPairingResult(
+            bootstrap.CoordinatorBaseUri.AbsoluteUri,
+            pairing.NodeId,
+            pairing.AccessToken);
+    }
+
+    public void ApplyPairing(RelayPairingResult pairing)
+    {
+        var coordinatorUri = RelayConnectionBootstrap.ParseCoordinatorBaseUri(pairing.CoordinatorBaseUrl);
         if (!RelayConfigurationPolicy.IsNodeIdValid(pairing.NodeId) ||
             !RelayConfigurationPolicy.IsAccessTokenValid(pairing.AccessToken))
         {

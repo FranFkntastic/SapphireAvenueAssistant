@@ -4,6 +4,7 @@
     <RootNamespace>SapphireAvenueAssistant</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\SapphireAvenue.BridgeProtocol\RelayConnectionBootstrap.cs" Link="Protocol\RelayConnectionBootstrap.cs" />
     <PackageReference Include="Chaos.NaCl.Standard" Version="1.0.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />

@@ -12,10 +12,8 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
     private readonly RelayConfiguration configuration;
     private readonly CwlsRelayWorker worker;
     private readonly CancellationTokenSource cancellation = new();
-    private string coordinatorUrl;
-    private string pairingCode = string.Empty;
-    private Task<PairNodeResponse>? pairingTask;
-    private string pairingCoordinatorUrl = string.Empty;
+    private string connectionString = string.Empty;
+    private Task<RelayPairingResult>? pairingTask;
     private string? actionMessage;
     private bool actionFailed;
 
@@ -24,7 +22,6 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
     {
         this.configuration = configuration;
         this.worker = worker;
-        coordinatorUrl = configuration.CoordinatorBaseUrl;
         SizeConstraints = new WindowSizeConstraints
         {
             MinimumSize = new Vector2(510f, 430f),
@@ -112,13 +109,10 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
 
     private void DrawPairing()
     {
-        ImGui.TextWrapped("In Discord, a server manager runs /bridge add-node. Enter the one-time code here within ten minutes.");
-        ImGui.Text("Coordinator");
+        ImGui.TextWrapped("In Discord, a server manager runs /bridge add-node. Paste the entire connection string here within ten minutes.");
+        ImGui.Text("Connection string");
         ImGui.SetNextItemWidth(-1f);
-        ImGui.InputTextWithHint("##CoordinatorUrl", "https://relay.example/", ref coordinatorUrl, 512);
-        ImGui.Text("One-time pairing code");
-        ImGui.SetNextItemWidth(-1f);
-        ImGui.InputTextWithHint("##PairingCode", "13-character pairing code", ref pairingCode, 96);
+        ImGui.InputTextWithHint("##ConnectionString", "SADB1 https://relay.example/ ONE-TIME-CODE", ref connectionString, 1024);
 
         var pairing = pairingTask is not null;
         if (pairing)
@@ -127,8 +121,7 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
         {
             actionMessage = null;
             actionFailed = false;
-            pairingCoordinatorUrl = coordinatorUrl.Trim();
-            pairingTask = worker.PairAsync(pairingCoordinatorUrl, pairingCode, cancellation.Token);
+            pairingTask = worker.PairAsync(connectionString, cancellation.Token);
         }
         if (pairing)
             ImGui.EndDisabled();
@@ -205,9 +198,8 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
         try
         {
             var pairing = completed.GetAwaiter().GetResult();
-            worker.ApplyPairing(pairingCoordinatorUrl, pairing);
-            coordinatorUrl = configuration.CoordinatorBaseUrl;
-            pairingCode = string.Empty;
+            worker.ApplyPairing(pairing);
+            connectionString = string.Empty;
             actionFailed = false;
             actionMessage = "Paired. Log in to report this node's character and home world; relay directions remain disabled.";
         }
@@ -227,12 +219,11 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
         if (!ImGui.BeginPopupModal("Disconnect this node?"))
             return;
 
-        ImGui.TextWrapped("This clears the local pairing credential, CWLS selection, and relay participation. Reconnecting requires a new one-time code from Discord.");
+        ImGui.TextWrapped("This clears the local pairing credential, CWLS selection, and relay participation. Reconnecting requires a new connection string from Discord.");
         if (ImGui.Button("Disconnect and clear"))
         {
             worker.ClearConfiguration();
-            coordinatorUrl = string.Empty;
-            pairingCode = string.Empty;
+            connectionString = string.Empty;
             actionFailed = false;
             actionMessage = "This installation was disconnected and cleared.";
             ImGui.CloseCurrentPopup();

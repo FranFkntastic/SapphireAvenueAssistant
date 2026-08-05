@@ -1,3 +1,5 @@
+using SapphireAvenue.BridgeProtocol;
+
 namespace SapphireAvenueAssistant.Configuration;
 
 public sealed class SapphireAvenueOptions
@@ -43,6 +45,8 @@ public sealed class RelayOptions
 {
     public string DatabasePath { get; init; } = "data/sapphire-avenue.db";
 
+    public string PublicBaseUrl { get; init; } = string.Empty;
+
     public int LeaderLeaseSeconds { get; init; } = 20;
 
     public int ClaimLeaseSeconds { get; init; } = 30;
@@ -62,4 +66,20 @@ public sealed class RelayOptions
     public TimeSpan PublishLeaseDuration => TimeSpan.FromSeconds(Math.Clamp(PublishLeaseSeconds, 5, 300));
 
     public int BoundedMaximumMessageBytes => Math.Clamp(MaximumMessageBytes, 64, 500);
+
+    public bool CanIssueConnectionStrings
+    {
+        get
+        {
+            try
+            {
+                _ = RelayConnectionBootstrap.ParseCoordinatorBaseUri(PublicBaseUrl);
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+    }
 }
