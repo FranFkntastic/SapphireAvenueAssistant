@@ -27,10 +27,10 @@ jobs:
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'dalamud-latest.zip'
-          $home = Join-Path $env:RUNNER_TEMP 'dalamud'
+          $dalamudRoot = Join-Path $env:RUNNER_TEMP 'dalamud'
           Invoke-WebRequest 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
-          Expand-Archive $archive -DestinationPath $home
-          "DALAMUD_HOME=$home" | Out-File $env:GITHUB_ENV -Append
+          Expand-Archive $archive -DestinationPath $dalamudRoot
+          "DALAMUD_HOME=$dalamudRoot" | Out-File $env:GITHUB_ENV -Append
 
       - name: Build release artifacts
         working-directory: SapphireAvenueAssistant
