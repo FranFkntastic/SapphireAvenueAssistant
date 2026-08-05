@@ -21,7 +21,18 @@ jobs:
           path: Franthropy
       - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: 10.0.301
+
+      - name: Install Dalamud reference assemblies
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'dalamud-latest.zip'
+          $dalamudRoot = Join-Path $env:APPDATA 'XIVLauncher\addon\Hooks\dev'
+          Invoke-WebRequest 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
+          Expand-Archive $archive -DestinationPath $dalamudRoot
+          if (-not (Test-Path (Join-Path $dalamudRoot 'Dalamud.dll'))) {
+            throw 'Dalamud reference bundle is incomplete.'
+          }
 
       - name: Build release artifacts
         working-directory: SapphireAvenueAssistant

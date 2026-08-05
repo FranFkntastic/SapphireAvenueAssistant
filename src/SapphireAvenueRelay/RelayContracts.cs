@@ -35,6 +35,8 @@ internal enum DeliveryOutcome
 
 internal sealed record CompletionRequest(string InstanceId, long Epoch, string ClaimId, DeliveryOutcome Outcome);
 internal sealed record ObservationRequest(
+    string InstanceId,
+    long Epoch,
     string ObservationId,
     int CwlsSlot,
     string SenderName,
@@ -48,7 +50,9 @@ internal sealed record ObservationEnvelope(
     string SenderName,
     string? SenderWorld,
     string Content,
-    DateTimeOffset ObservedAtUtc);
+    DateTimeOffset ObservedAtUtc,
+    string? InstanceId = null,
+    long Epoch = 0);
 
 internal sealed record ObservationOutbox(List<ObservationEnvelope> Items);
 

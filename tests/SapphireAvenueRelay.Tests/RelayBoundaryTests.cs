@@ -47,6 +47,48 @@ public sealed class RelayBoundaryTests
     }
 
     [Theory]
+    [InlineData("leader", 1, true)]
+    [InlineData("standby", 1, false)]
+    [InlineData("observer", 1, false)]
+    [InlineData("offline", 1, false)]
+    [InlineData("leader", 0, false)]
+    [InlineData("leader", -1, false)]
+    public void ObservationCaptureRequiresCurrentUnexpiredLeader(
+        string role,
+        int secondsUntilExpiry,
+        bool expected)
+    {
+        var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
+
+        Assert.Equal(
+            expected,
+            RelayConfigurationPolicy.MayReportObservation(
+                role,
+                now.AddSeconds(secondsUntilExpiry),
+                now));
+    }
+
+    [Fact]
+    public void QueuedObservationCannotCrossInstanceOrEpochBoundary()
+    {
+        var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
+        var current = new ObservationEnvelope(
+            "current", 1, "CWLS Friend", "Siren", "line", now, "instance-a", 7);
+        var legacy = current with { ObservationId = "legacy", InstanceId = null, Epoch = 0 };
+        var oldEpoch = current with { ObservationId = "old-epoch", Epoch = 6 };
+        var oldInstance = current with { ObservationId = "old-instance", InstanceId = "instance-old" };
+
+        Assert.True(RelayConfigurationPolicy.MaySubmitObservation(
+            current, "instance-a", 7, "leader", now.AddSeconds(1), now));
+        Assert.False(RelayConfigurationPolicy.MaySubmitObservation(
+            legacy, "instance-a", 7, "leader", now.AddSeconds(1), now));
+        Assert.False(RelayConfigurationPolicy.MaySubmitObservation(
+            oldEpoch, "instance-a", 7, "leader", now.AddSeconds(1), now));
+        Assert.False(RelayConfigurationPolicy.MaySubmitObservation(
+            oldInstance, "instance-a", 7, "leader", now.AddSeconds(1), now));
+    }
+
+    [Theory]
     [InlineData("https://relay.example/", true)]
     [InlineData("http://127.0.0.1:5074", true)]
     [InlineData("http://relay.example/", false)]

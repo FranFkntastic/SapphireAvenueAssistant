@@ -111,6 +111,8 @@ internal sealed class RelayCoordinatorClient : IDisposable
             "observations",
             JsonContent.Create(
                 new ObservationRequest(
+                    observation.InstanceId ?? string.Empty,
+                    observation.Epoch,
                     observation.ObservationId,
                     observation.CwlsSlot,
                     observation.SenderName,
@@ -119,6 +121,8 @@ internal sealed class RelayCoordinatorClient : IDisposable
                     observation.ObservedAtUtc),
                 RelayJsonContext.Default.ObservationRequest),
             cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.Conflict)
+            return;
         response.EnsureSuccessStatusCode();
     }
 
