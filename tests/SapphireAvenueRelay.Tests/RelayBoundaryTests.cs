@@ -75,10 +75,12 @@ public sealed class RelayBoundaryTests
     public void HeartbeatPublishesSenderEligibilityOnEveryRequest()
     {
         var json = System.Text.Json.JsonSerializer.Serialize(
-            new HeartbeatRequest("runtime-instance", false),
+            new HeartbeatRequest("runtime-instance", false, "Wei Ning", 40, "Sargatanas"),
             RelayJsonContext.Default.HeartbeatRequest);
 
-        Assert.Equal("{\"instanceId\":\"runtime-instance\",\"canSendToGame\":false}", json);
+        Assert.Equal(
+            "{\"instanceId\":\"runtime-instance\",\"canSendToGame\":false,\"characterName\":\"Wei Ning\",\"homeWorldId\":40,\"homeWorldName\":\"Sargatanas\"}",
+            json);
     }
 
     [Fact]
@@ -125,6 +127,17 @@ public sealed class RelayBoundaryTests
     }
 
     [Fact]
+    public void NodeIdentityUsesOnlyCharacterAndHomeWorld()
+    {
+        Assert.Equal(
+            "Mega Phone @ Sargatanas",
+            RelayConfigurationPolicy.DisplayNodeIdentity("Mega Phone", "Sargatanas"));
+        Assert.Equal(
+            "Waiting for a logged-in character",
+            RelayConfigurationPolicy.DisplayNodeIdentity(null, null));
+    }
+
+    [Fact]
     public void CwlsSelectionRequiresTheExactDiscoveredNameAndSlot()
     {
         CwlsSlotSnapshot[] slots = [new(1, "Hunters of Light"), new(2, "Sapphire Ave Company")];
@@ -160,6 +173,7 @@ public sealed class RelayBoundaryTests
             "test",
             loggedIn,
             "Wei Ning",
+            "Sargatanas",
             [new CwlsSlotSnapshot(1, "Sapphire Ave Company")],
             1,
             "Sapphire Ave Company",

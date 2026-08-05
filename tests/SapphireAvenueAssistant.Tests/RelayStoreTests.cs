@@ -187,6 +187,14 @@ public sealed class RelayStoreTests
                 "100000000000000101", "10000000000000002", "10000000000000005",
                 BridgeManagementAction.Configure, "10000000000000003", "10000000000000006"),
             now);
+        await fixture.Store.HeartbeatAsync(
+            "relay-a", "identity-a", now.AddSeconds(-2),
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Wei Ning", 40, "Sargatanas"));
+        await fixture.Store.HeartbeatAsync(
+            "relay-b", "identity-b", now.AddSeconds(-1),
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Mega Phone", 40, "Sargatanas"));
         await fixture.Store.ApplyBridgeManagementAsync(
             new BridgeManagementRequest(
                 "100000000000000102", "10000000000000002", "10000000000000005",
@@ -235,15 +243,15 @@ public sealed class RelayStoreTests
         var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
         var request = new BridgeManagementRequest(
             "100000000000000111", "10000000000000002", "10000000000000005",
-            BridgeManagementAction.AddNode, NodeLabel: "Wei Ning Primary");
+            BridgeManagementAction.AddNode);
         var issued = await fixture.Store.ApplyBridgeManagementAsync(request, now);
         var code = Regex.Match(issued.Response, "`([A-Z2-7]{13})`").Groups[1].Value;
 
         Assert.True(issued.Succeeded);
         Assert.Equal(13, code.Length);
+        Assert.Contains("logged-in character and home world", issued.Response, StringComparison.Ordinal);
         var exchanged = await fixture.Store.ExchangePairingCodeAsync(code, now.AddMinutes(1));
         Assert.NotNull(exchanged);
-        Assert.Equal("Wei Ning Primary", exchanged.NodeLabel);
         Assert.True(await fixture.Store.AuthorizeNodeAsync(exchanged.NodeId, exchanged.AccessToken));
         Assert.Null(await fixture.Store.ExchangePairingCodeAsync(code, now.AddMinutes(2)));
 
@@ -251,15 +259,136 @@ public sealed class RelayStoreTests
         Assert.True(replay.Replayed);
         Assert.DoesNotContain(code, replay.Response, StringComparison.Ordinal);
         var conflict = await fixture.Store.ApplyBridgeManagementAsync(
-            request with { NodeLabel = "Different Node" },
+            request with { NodeId = "different-hidden-value" },
             now.AddMinutes(2));
         Assert.True(conflict.Conflict);
 
         var expiring = await fixture.Store.ApplyBridgeManagementAsync(
-            request with { InteractionId = "100000000000000112", NodeLabel = "Expired Node" },
+            request with { InteractionId = "100000000000000112", NodeId = null },
             now);
         var expiringCode = Regex.Match(expiring.Response, "`([A-Z2-7]{13})`").Groups[1].Value;
         Assert.Null(await fixture.Store.ExchangePairingCodeAsync(expiringCode, now.AddMinutes(11)));
+    }
+
+    [Fact]
+    public async Task DuplicateCharacterWorldRevokesAndFencesTheConflictingInstallation()
+    {
+        await using var fixture = await StoreFixture.CreateAsync(new Dictionary<string, string>
+        {
+            ["relay-a"] = "token-a",
+            ["relay-b"] = "token-b",
+            ["relay-c"] = "token-c"
+        });
+        var now = DateTimeOffset.Parse("2026-08-04T12:00:00Z");
+        await fixture.Store.HeartbeatAsync(
+            "relay-a", "instance-a", now,
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Wei Ning", 40, "Sargatanas"));
+        var leader = await fixture.Store.HeartbeatAsync(
+            "relay-b", "instance-b", now.AddSeconds(1),
+            canSendToGame: true,
+            identity: new RelayNodeIdentity("Backup Relay", 40, "Sargatanas"));
+        Assert.True(leader.IsLeader);
+
+        var preferred = await fixture.Store.ApplyBridgeManagementAsync(
+            new BridgeManagementRequest(
+                "100000000000000171", "10000000000000002", "10000000000000005",
+                BridgeManagementAction.PreferNode, NodeId: "relay-b"),
+            now.AddSeconds(1));
+        Assert.True(preferred.Succeeded);
+        Assert.Contains("Backup Relay @ Sargatanas", preferred.Response, StringComparison.Ordinal);
+        Assert.DoesNotContain("relay-b", preferred.Response, StringComparison.Ordinal);
+
+        var queued = await fixture.Store.EnqueueOutboundAsync(
+            "100000000000000172", "100000000000000173", "Manager", "Race fixture", now.AddSeconds(1));
+        var claimed = await fixture.Store.ClaimOutboundAsync(
+            "relay-b", "instance-b", leader.Epoch, now.AddSeconds(2));
+        Assert.NotNull(claimed.Message);
+
+        var conflict = await fixture.Store.HeartbeatAsync(
+            "relay-b", "instance-b", now.AddSeconds(3),
+            canSendToGame: true,
+            identity: new RelayNodeIdentity("wei ning", 40, "Sargatanas"));
+        Assert.False(conflict.Authorized);
+        Assert.Equal("wei ning @ Sargatanas", conflict.IdentityConflict);
+        Assert.False(await fixture.Store.AuthorizeNodeAsync("relay-b", "token-b"));
+        Assert.Null((await fixture.Store.GetCommunityConfigurationAsync("10000000000000002"))!.PreferredNodeId);
+
+        var laterClaim = await fixture.Store.ClaimOutboundAsync(
+            "relay-b", "instance-b", leader.Epoch, now.AddSeconds(4));
+        var completion = await fixture.Store.CompleteOutboundAsync(
+            "relay-b", "instance-b", leader.Epoch,
+            queued.MessageId, claimed.Message!.ClaimId, DeliveryOutcome.Sent, now.AddSeconds(4));
+        var observation = await fixture.Store.EnqueueObservationAsync(
+            "relay-b",
+            new InboundObservation("identity-conflict:observation", 1, "Backup Relay", null, "blocked", now),
+            now.AddSeconds(4));
+        Assert.False(laterClaim.NodeActive);
+        Assert.Equal(NodeMutationResult.Unauthorized, completion);
+        Assert.False(observation.Authorized);
+
+        var otherWorld = await fixture.Store.HeartbeatAsync(
+            "relay-c", "instance-c", now.AddSeconds(4),
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Wei Ning", 41, "Balmung"));
+        Assert.True(otherWorld.Authorized);
+
+        var list = await fixture.Store.ApplyBridgeManagementAsync(
+            new BridgeManagementRequest(
+                "100000000000000174", "10000000000000002", "10000000000000005",
+                BridgeManagementAction.ListNodes),
+            now.AddSeconds(5));
+        Assert.Contains("Wei Ning @ Sargatanas", list.Response, StringComparison.Ordinal);
+        Assert.Contains("Wei Ning @ Balmung", list.Response, StringComparison.Ordinal);
+        Assert.DoesNotContain("relay-a", list.Response, StringComparison.Ordinal);
+        Assert.DoesNotContain("relay-b", list.Response, StringComparison.Ordinal);
+        Assert.DoesNotContain("relay-c", list.Response, StringComparison.Ordinal);
+
+        var preferWinner = await fixture.Store.ApplyBridgeManagementAsync(
+            new BridgeManagementRequest(
+                "100000000000000175", "10000000000000002", "10000000000000005",
+                BridgeManagementAction.PreferNode, NodeId: "relay-a"),
+            now.AddSeconds(6));
+        var status = await fixture.Store.ApplyBridgeManagementAsync(
+            new BridgeManagementRequest(
+                "100000000000000176", "10000000000000002", "10000000000000005",
+                BridgeManagementAction.Status),
+            now.AddSeconds(6));
+        var revokeOtherWorld = await fixture.Store.ApplyBridgeManagementAsync(
+            new BridgeManagementRequest(
+                "100000000000000177", "10000000000000002", "10000000000000005",
+                BridgeManagementAction.RevokeNode, NodeId: "relay-c"),
+            now.AddSeconds(7));
+        Assert.Contains("Wei Ning @ Sargatanas", preferWinner.Response, StringComparison.Ordinal);
+        Assert.Contains("Wei Ning @ Sargatanas", status.Response, StringComparison.Ordinal);
+        Assert.Contains("Wei Ning @ Balmung", revokeOtherWorld.Response, StringComparison.Ordinal);
+        Assert.DoesNotContain("relay-a", status.Response, StringComparison.Ordinal);
+        Assert.DoesNotContain("relay-c", revokeOtherWorld.Response, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MissingIdentityPreservesLastTruthAndRenameOrTransferUpdatesTheSameNode()
+    {
+        await using var fixture = await StoreFixture.CreateAsync();
+        var now = DateTimeOffset.Parse("2026-08-04T12:00:00Z");
+        await fixture.Store.HeartbeatAsync(
+            "relay-a", "instance-a", now,
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Wei Ning", 40, "Sargatanas"));
+        await fixture.Store.HeartbeatAsync(
+            "relay-a", "instance-a", now.AddSeconds(1), canSendToGame: false);
+
+        var preserved = await fixture.Store.SearchNodeChoicesAsync("10000000000000002", "Wei");
+        Assert.Contains(preserved, choice => choice.DisplayName == "Wei Ning @ Sargatanas");
+
+        await fixture.Store.HeartbeatAsync(
+            "relay-a", "instance-a", now.AddSeconds(2),
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Wei Renamed", 41, "Balmung"));
+        var updated = await fixture.Store.SearchNodeChoicesAsync("10000000000000002", "Wei");
+        Assert.Single(updated);
+        Assert.Equal("Wei Renamed @ Balmung", updated[0].DisplayName);
+        Assert.Equal("relay-a", updated[0].NodeId);
     }
 
     [Fact]
@@ -267,7 +396,10 @@ public sealed class RelayStoreTests
     {
         await using var fixture = await StoreFixture.CreateAsync();
         var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
-        var lease = await fixture.Store.HeartbeatAsync("relay-a", "instance-a", now, canSendToGame: true);
+        var lease = await fixture.Store.HeartbeatAsync(
+            "relay-a", "instance-a", now,
+            canSendToGame: true,
+            identity: new RelayNodeIdentity("Wei Ning", 40, "Sargatanas"));
         var queued = await fixture.Store.EnqueueOutboundAsync(
             "100000000000000121", "100000000000000122", "Race Tester", "Before revoke", now);
         var claimed = await fixture.Store.ClaimOutboundAsync(
@@ -304,6 +436,10 @@ public sealed class RelayStoreTests
     {
         await using var fixture = await StoreFixture.CreateAsync();
         var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
+        await fixture.Store.HeartbeatAsync(
+            "relay-a", "identity-a", now.AddSeconds(-1),
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Wei Ning", 40, "Sargatanas"));
         await fixture.Store.ApplyBridgeManagementAsync(
             new BridgeManagementRequest(
                 "100000000000000124", "10000000000000002", "10000000000000005",
@@ -413,7 +549,10 @@ public sealed class RelayStoreTests
     {
         await using var fixture = await StoreFixture.CreateAsync();
         var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
-        await fixture.Store.HeartbeatAsync("relay-a", "instance-a", now, canSendToGame: true);
+        await fixture.Store.HeartbeatAsync(
+            "relay-a", "instance-a", now,
+            canSendToGame: true,
+            identity: new RelayNodeIdentity("Wei Ning", 40, "Sargatanas"));
 
         var status = await fixture.Store.ApplyBridgeManagementAsync(
             new BridgeManagementRequest(
@@ -421,12 +560,13 @@ public sealed class RelayStoreTests
                 BridgeManagementAction.ListNodes),
             now.AddSeconds(11));
 
-        Assert.Contains("relay-a", status.Response, StringComparison.Ordinal);
+        Assert.Contains("Wei Ning @ Sargatanas", status.Response, StringComparison.Ordinal);
+        Assert.DoesNotContain("relay-a", status.Response, StringComparison.Ordinal);
         Assert.DoesNotContain("leader", status.Response, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task LegacyHeartbeatCompatibilityIsBoundedAndNodeLabelsRemainTruthful()
+    public async Task LegacyHeartbeatCompatibilityIsBoundedAndTechnicalIdsRemainHidden()
     {
         Assert.True(new RelayOptions().AllowLegacyHeartbeatWithoutCapability);
         var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
@@ -439,7 +579,9 @@ public sealed class RelayStoreTests
                 canSendToGame: null,
                 allowLegacyHeartbeatWithoutCapability: true);
             var eligibleStandby = await allowedFixture.Store.HeartbeatAsync(
-                "relay-b", "modern-instance", now.AddSeconds(1), canSendToGame: true);
+                "relay-b", "modern-instance", now.AddSeconds(1),
+                canSendToGame: true,
+                identity: new RelayNodeIdentity("Mega Phone", 40, "Sargatanas"));
             var initialStatus = await allowedFixture.Store.ApplyBridgeManagementAsync(
                 new BridgeManagementRequest(
                     "100000000000000161", "10000000000000002", "10000000000000005",
@@ -448,8 +590,11 @@ public sealed class RelayStoreTests
 
             Assert.True(legacyLeader.IsLeader);
             Assert.False(eligibleStandby.IsLeader);
-            Assert.Contains("leader; legacy capability unknown", initialStatus.Response, StringComparison.Ordinal);
+            Assert.Contains("1 setup is waiting", initialStatus.Response, StringComparison.Ordinal);
+            Assert.Contains("Mega Phone @ Sargatanas", initialStatus.Response, StringComparison.Ordinal);
             Assert.Contains("standby", initialStatus.Response, StringComparison.Ordinal);
+            Assert.DoesNotContain("relay-a", initialStatus.Response, StringComparison.Ordinal);
+            Assert.DoesNotContain("relay-b", initialStatus.Response, StringComparison.Ordinal);
 
             await allowedFixture.Store.HeartbeatAsync(
                 "relay-b", "modern-instance", now.AddSeconds(3), canSendToGame: false);
@@ -477,8 +622,9 @@ public sealed class RelayStoreTests
 
             Assert.True(legacyObserver.Authorized);
             Assert.False(legacyObserver.IsLeader);
-            Assert.Contains("legacy; capability unknown", disabledStatus.Response, StringComparison.Ordinal);
-            Assert.DoesNotContain("leader; legacy", disabledStatus.Response, StringComparison.Ordinal);
+            Assert.Contains("2 setups are waiting", disabledStatus.Response, StringComparison.Ordinal);
+            Assert.DoesNotContain("relay-a", disabledStatus.Response, StringComparison.Ordinal);
+            Assert.DoesNotContain("relay-b", disabledStatus.Response, StringComparison.Ordinal);
         }
     }
 
@@ -527,6 +673,93 @@ public sealed class RelayStoreTests
 
             Assert.Single(columns, column => column == "can_send_to_game");
             Assert.Single(columns, column => column == "capability_reported");
+            Assert.Single(columns, column => column == "character_name");
+            Assert.Single(columns, column => column == "character_name_normalized");
+            Assert.Single(columns, column => column == "home_world_id");
+            Assert.Single(columns, column => column == "home_world_name");
+            await reader.DisposeAsync();
+
+            await using var indexes = inspectConnection.CreateCommand();
+            indexes.CommandText = "PRAGMA index_list(relay_nodes);";
+            await using var indexReader = await indexes.ExecuteReaderAsync();
+            var indexNames = new List<string>();
+            while (await indexReader.ReadAsync())
+            {
+                indexNames.Add(indexReader.GetString(1));
+            }
+            Assert.Single(indexNames, name => name == "ux_relay_nodes_character_world");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var path in new[] { databasePath, $"{databasePath}-shm", $"{databasePath}-wal" })
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task IdentityMigrationRevokesDuplicateClaimBeforeCreatingUniqueIndex()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"sapphire-avenue-identity-migration-{Guid.NewGuid():N}.db");
+        var options = new SapphireAvenueOptions
+        {
+            Relay = new RelayOptions { DatabasePath = databasePath }
+        };
+        try
+        {
+            await using (var connection = new SqliteConnection($"Data Source={databasePath}"))
+            {
+                await connection.OpenAsync();
+                await using var create = connection.CreateCommand();
+                create.CommandText = """
+                    CREATE TABLE relay_nodes (
+                        node_id TEXT PRIMARY KEY,
+                        label TEXT NOT NULL,
+                        token_hash BLOB NULL,
+                        last_seen_at_ms INTEGER NULL,
+                        last_instance_id TEXT NULL,
+                        can_send_to_game INTEGER NOT NULL DEFAULT 0,
+                        capability_reported INTEGER NOT NULL DEFAULT 0,
+                        character_name TEXT NULL,
+                        character_name_normalized TEXT NULL,
+                        home_world_id INTEGER NULL,
+                        home_world_name TEXT NULL,
+                        revoked_at_ms INTEGER NULL,
+                        revoked_by_discord_user_id TEXT NULL
+                    );
+                    INSERT INTO relay_nodes(
+                        node_id, label, token_hash, character_name, character_name_normalized,
+                        home_world_id, home_world_name)
+                    VALUES
+                        ('older', '', X'01', 'Wei Ning', 'WEI NING', 40, 'Sargatanas'),
+                        ('newer', '', X'02', 'wei ning', 'WEI NING', 40, 'Sargatanas');
+                    """;
+                await create.ExecuteNonQueryAsync();
+            }
+
+            var store = new RelayStore(options);
+            await store.InitializeAsync();
+            await store.InitializeAsync();
+
+            await using var inspect = new SqliteConnection($"Data Source={databasePath}");
+            await inspect.OpenAsync();
+            await using var count = inspect.CreateCommand();
+            count.CommandText = """
+                SELECT
+                    SUM(CASE WHEN revoked_at_ms IS NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN revoked_by_discord_user_id = 'identity-migration-conflict' THEN 1 ELSE 0 END)
+                FROM relay_nodes
+                WHERE character_name_normalized = 'WEI NING' AND home_world_id = 40;
+                """;
+            await using var reader = await count.ExecuteReaderAsync();
+            Assert.True(await reader.ReadAsync());
+            Assert.Equal(1, reader.GetInt32(0));
+            Assert.Equal(1, reader.GetInt32(1));
         }
         finally
         {

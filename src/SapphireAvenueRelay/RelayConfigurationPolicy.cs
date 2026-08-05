@@ -38,14 +38,14 @@ internal static class RelayConfigurationPolicy
         value is { Length: > 0 and <= 64 } &&
         value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or ':');
 
-    public static bool IsNodeLabelValid(string? value) =>
-        !string.IsNullOrWhiteSpace(value) &&
-        value.Length <= 80 &&
-        value.All(character => !char.IsControl(character));
-
     public static bool IsAccessTokenValid(string? value) =>
         value is { Length: 43 } &&
         value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_');
+
+    public static string DisplayNodeIdentity(string? characterName, string? homeWorldName) =>
+        string.IsNullOrWhiteSpace(characterName) || string.IsNullOrWhiteSpace(homeWorldName)
+            ? "Waiting for a logged-in character"
+            : $"{characterName} @ {homeWorldName}";
 
     public static bool IsCoordinatorConfigured(RelayConfiguration configuration)
     {

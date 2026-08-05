@@ -153,6 +153,15 @@ public sealed class RelayStore
                 connection, "relay_nodes", "can_send_to_game", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
             await EnsureColumnAsync(
                 connection, "relay_nodes", "capability_reported", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "relay_nodes", "character_name", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "relay_nodes", "character_name_normalized", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "relay_nodes", "home_world_id", "INTEGER NULL", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "relay_nodes", "home_world_name", "TEXT NULL", cancellationToken);
+            await EnsureNodeIdentityIndexAsync(connection, cancellationToken);
             await SeedConfigurationAsync(connection, cancellationToken);
             await SeedRelayNodesAsync(connection, cancellationToken);
         }
@@ -218,8 +227,7 @@ public sealed class RelayStore
             (int)request.Action,
             request.ChannelId ?? string.Empty,
             request.RoleId ?? string.Empty,
-            request.NodeId ?? string.Empty,
-            request.NodeLabel ?? string.Empty));
+            request.NodeId ?? string.Empty));
         await gate.WaitAsync(cancellationToken);
         try
         {
@@ -288,7 +296,7 @@ public sealed class RelayStore
             await using var select = connection.CreateCommand();
             select.Transaction = transaction;
             select.CommandText = """
-                SELECT p.node_id, n.label
+                SELECT p.node_id
                 FROM relay_pairing_codes p
                 JOIN relay_nodes n ON n.node_id = p.node_id
                 WHERE p.code_hash = $codeHash
@@ -306,7 +314,6 @@ public sealed class RelayStore
             }
 
             var nodeId = reader.GetString(0);
-            var nodeLabel = reader.GetString(1);
             await reader.DisposeAsync();
             var accessToken = Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
             await using var consume = connection.CreateCommand();
@@ -329,7 +336,7 @@ public sealed class RelayStore
             consume.Parameters.AddWithValue("$nodeId", nodeId);
             await consume.ExecuteNonQueryAsync(cancellationToken);
             transaction.Commit();
-            return new PairingExchangeResult(nodeId, nodeLabel, accessToken);
+            return new PairingExchangeResult(nodeId, accessToken);
         }
         finally
         {
@@ -342,6 +349,7 @@ public sealed class RelayStore
         string instanceId,
         DateTimeOffset now,
         bool? canSendToGame = null,
+        RelayNodeIdentity? identity = null,
         bool allowLegacyHeartbeatWithoutCapability = true,
         CancellationToken cancellationToken = default)
     {
@@ -352,6 +360,35 @@ public sealed class RelayStore
             using var transaction = connection.BeginTransaction();
             var nowMs = now.ToUnixTimeMilliseconds();
             var effectiveCanSendToGame = canSendToGame ?? allowLegacyHeartbeatWithoutCapability;
+            if (identity is not null)
+            {
+                var conflict = await ReadIdentityClaimantAsync(
+                    connection,
+                    transaction,
+                    nodeId,
+                    RelayText.NormalizeIdentityKey(identity.CharacterName),
+                    identity.HomeWorldId,
+                    cancellationToken);
+                if (conflict)
+                {
+                    await RevokeAndFenceNodeAsync(
+                        connection,
+                        transaction,
+                        nodeId,
+                        nowMs,
+                        "identity-conflict",
+                        cancellationToken);
+                    transaction.Commit();
+                    return new LeaderLease(
+                        false,
+                        false,
+                        false,
+                        0,
+                        DateTimeOffset.UnixEpoch,
+                        identity.DisplayName);
+                }
+            }
+
             await using (var seen = connection.CreateCommand())
             {
                 seen.Transaction = transaction;
@@ -360,7 +397,11 @@ public sealed class RelayStore
                     SET last_seen_at_ms = $now,
                         last_instance_id = $instanceId,
                         can_send_to_game = $canSendToGame,
-                        capability_reported = $capabilityReported
+                        capability_reported = $capabilityReported,
+                        character_name = COALESCE($characterName, character_name),
+                        character_name_normalized = COALESCE($characterNameNormalized, character_name_normalized),
+                        home_world_id = COALESCE($homeWorldId, home_world_id),
+                        home_world_name = COALESCE($homeWorldName, home_world_name)
                     WHERE node_id = $nodeId
                       AND revoked_at_ms IS NULL;
                     """;
@@ -368,6 +409,12 @@ public sealed class RelayStore
                 seen.Parameters.AddWithValue("$instanceId", instanceId);
                 seen.Parameters.AddWithValue("$canSendToGame", effectiveCanSendToGame ? 1 : 0);
                 seen.Parameters.AddWithValue("$capabilityReported", canSendToGame.HasValue ? 1 : 0);
+                seen.Parameters.AddWithValue("$characterName", (object?)identity?.CharacterName ?? DBNull.Value);
+                seen.Parameters.AddWithValue("$characterNameNormalized", identity is null
+                    ? DBNull.Value
+                    : RelayText.NormalizeIdentityKey(identity.CharacterName));
+                seen.Parameters.AddWithValue("$homeWorldId", (object?)identity?.HomeWorldId ?? DBNull.Value);
+                seen.Parameters.AddWithValue("$homeWorldName", (object?)identity?.HomeWorldName ?? DBNull.Value);
                 seen.Parameters.AddWithValue("$nodeId", nodeId);
                 if (await seen.ExecuteNonQueryAsync(cancellationToken) != 1)
                 {
@@ -375,6 +422,9 @@ public sealed class RelayStore
                     return new LeaderLease(false, false, false, 0, DateTimeOffset.UnixEpoch);
                 }
             }
+
+            var hasIdentity = await HasNodeIdentityAsync(connection, transaction, nodeId, cancellationToken);
+            effectiveCanSendToGame &= hasIdentity || allowLegacyHeartbeatWithoutCapability;
 
             var state = await ReadLeaderAsync(connection, transaction, cancellationToken);
             var preferred = await ReadPreferredNodeAsync(connection, transaction, cancellationToken);
@@ -1094,6 +1144,49 @@ public sealed class RelayStore
         }
     }
 
+    public async Task<IReadOnlyList<RelayNodeChoice>> SearchNodeChoicesAsync(
+        string guildId,
+        string? query,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedQuery = RelayText.Normalize(query, 100) ?? string.Empty;
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT n.node_id, n.character_name, n.home_world_name
+                FROM relay_nodes n
+                JOIN community_relay_configuration c ON c.singleton = 1
+                WHERE c.guild_id = $guildId
+                  AND n.revoked_at_ms IS NULL
+                  AND n.token_hash IS NOT NULL
+                  AND n.character_name IS NOT NULL
+                  AND n.home_world_id IS NOT NULL
+                  AND n.home_world_name IS NOT NULL
+                ORDER BY n.character_name_normalized, n.home_world_id, n.node_id;
+                """;
+            command.Parameters.AddWithValue("$guildId", guildId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            var choices = new List<RelayNodeChoice>();
+            while (choices.Count < 25 && await reader.ReadAsync(cancellationToken))
+            {
+                var display = RelayText.DisplayNode(reader.GetString(1), reader.GetString(2));
+                if (display.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+                {
+                    choices.Add(new RelayNodeChoice(reader.GetString(0), display));
+                }
+            }
+
+            return choices;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
     private async Task<TEnum?> ReadEnumAsync<TEnum>(
         string sql,
         string id,
@@ -1128,21 +1221,27 @@ public sealed class RelayStore
         {
             var configuration = await ReadCommunityConfigurationAsync(
                 connection, transaction, request.GuildId, cancellationToken);
+            var preferredDisplay = configuration?.PreferredNodeId is { } preferredNodeId
+                ? await ReadNodeDisplayAsync(connection, transaction, preferredNodeId, cancellationToken)
+                : null;
             var response = configuration is null
                 ? "The CWLS relay is not configured."
                 : $"Relay {(configuration.IsPaused ? "paused" : "running")} in <#{configuration.ChannelId}> for " +
                     (configuration.AllowedRoleId is null ? "everyone in the server" : $"<@&{configuration.AllowedRoleId}>") +
-                    $". Preferred node: `{configuration.PreferredNodeId ?? "automatic"}`.";
+                    $". Preferred node: {(preferredDisplay is null ? "automatic" : RelayText.EscapeDiscordMarkdown(preferredDisplay))}.";
             return new BridgeManagementResult(true, false, false, response);
         }
 
         if (request.Action == BridgeManagementAction.ListNodes)
         {
             var nodes = await ReadNodeStatusesAsync(connection, transaction, now, cancellationToken);
-            var response = nodes.Count == 0
+            var identified = nodes.Where(node =>
+                node.CharacterName is not null && node.HomeWorldId is not null && node.HomeWorldName is not null).ToArray();
+            var waitingCount = nodes.Count - identified.Length;
+            var response = identified.Length == 0 && waitingCount == 0
                 ? "No relay nodes are registered."
-                : string.Join('\n', nodes.Select(node =>
-                    $"`{node.NodeId}` — {RelayText.EscapeDiscordMarkdown(node.Label)}; " +
+                : string.Join('\n', identified.Select(node =>
+                    $"**{RelayText.EscapeDiscordMarkdown(RelayText.DisplayNode(node.CharacterName!, node.HomeWorldName!))}** — " +
                     (node.IsRevoked ? "revoked" :
                         !node.IsPaired ? "awaiting pairing" :
                         node.IsLeader && !node.CapabilityReported ? "leader; legacy capability unknown" :
@@ -1150,7 +1249,10 @@ public sealed class RelayStore
                         !node.CapabilityReported ? "legacy; capability unknown" :
                         node.CanSendToGame ? "standby" :
                         "observer; not eligible to send") +
-                    (node.IsPreferred ? "; preferred" : string.Empty)));
+                    (node.IsPreferred ? "; preferred" : string.Empty))
+                    .Concat(waitingCount == 0
+                        ? []
+                        : [$"{waitingCount} setup{(waitingCount == 1 ? " is" : "s are")} waiting for a logged-in character identity."]));
             if (response.Length > 1900)
             {
                 response = $"{response[..1870]}\n…additional nodes omitted.";
@@ -1261,24 +1363,25 @@ public sealed class RelayStore
 
         if (request.Action == BridgeManagementAction.AddNode)
         {
-            var label = RelayText.Normalize(request.NodeLabel, 80);
-            if (label is null)
-            {
-                return Failure("Provide a node name within 80 characters.");
-            }
-
             var nodeId = $"node-{Base64UrlEncode(RandomNumberGenerator.GetBytes(9))}";
             var pairingCode = GeneratePairingCode();
             await using var add = connection.CreateCommand();
             add.Transaction = transaction;
             add.CommandText = """
+                DELETE FROM relay_pairing_codes
+                WHERE consumed_at_ms IS NULL AND expires_at_ms <= $now;
+                DELETE FROM relay_nodes
+                WHERE token_hash IS NULL
+                  AND character_name IS NULL
+                  AND revoked_at_ms IS NULL
+                  AND node_id NOT IN (SELECT node_id FROM relay_pairing_codes);
                 INSERT INTO relay_nodes(node_id, label, token_hash)
-                VALUES ($nodeId, $label, NULL);
+                VALUES ($nodeId, '', NULL);
                 INSERT INTO relay_pairing_codes(code_hash, node_id, expires_at_ms)
                 VALUES ($codeHash, $nodeId, $expiresAt);
                 """;
+            add.Parameters.AddWithValue("$now", nowMs);
             add.Parameters.AddWithValue("$nodeId", nodeId);
-            add.Parameters.AddWithValue("$label", label);
             add.Parameters.AddWithValue("$codeHash", HashSecret(pairingCode));
             add.Parameters.AddWithValue("$expiresAt", (now + TimeSpan.FromMinutes(10)).ToUnixTimeMilliseconds());
             await add.ExecuteNonQueryAsync(cancellationToken);
@@ -1286,7 +1389,7 @@ public sealed class RelayStore
                 true,
                 false,
                 false,
-                $"Node **{RelayText.EscapeDiscordMarkdown(label)}** created. Pair it within 10 minutes using code `{pairingCode}`. This code is shown only here; the durable access token is returned only to the relay node.");
+                $"Pair a relay installation within 10 minutes using code `{pairingCode}`. Its node name will appear automatically as the logged-in character and home world. This code is shown only here; the durable access token is returned only to the relay installation.");
         }
 
         if (request.Action == BridgeManagementAction.ClearPreference)
@@ -1331,7 +1434,11 @@ public sealed class RelayStore
                   AND guild_id = $guildId
                   AND EXISTS (
                       SELECT 1 FROM relay_nodes
-                      WHERE node_id = $nodeId AND revoked_at_ms IS NULL AND token_hash IS NOT NULL);
+                      WHERE node_id = $nodeId
+                        AND revoked_at_ms IS NULL
+                        AND token_hash IS NOT NULL
+                        AND character_name IS NOT NULL
+                        AND home_world_id IS NOT NULL);
                 """;
             prefer.Parameters.AddWithValue("$nodeId", request.NodeId);
             prefer.Parameters.AddWithValue("$actorId", request.ActorDiscordUserId);
@@ -1342,8 +1449,14 @@ public sealed class RelayStore
                 return Failure("That active relay node does not exist, or the relay is not configured.");
             }
 
+            var preferredDisplay = await ReadNodeDisplayAsync(
+                connection, transaction, request.NodeId, cancellationToken)
+                ?? throw new InvalidOperationException("Preferred node identity disappeared during the transaction.");
             return new BridgeManagementResult(
-                true, false, false, $"`{request.NodeId}` will be preferred at the next safe lease turnover.");
+                true,
+                false,
+                false,
+                $"{RelayText.EscapeDiscordMarkdown(preferredDisplay)} will be preferred at the next safe lease turnover.");
         }
 
         if (request.Action == BridgeManagementAction.RevokeNode)
@@ -1351,6 +1464,13 @@ public sealed class RelayStore
             if (string.IsNullOrWhiteSpace(request.NodeId))
             {
                 return Failure("Choose a relay node.");
+            }
+
+            var revokedDisplay = await ReadNodeDisplayAsync(
+                connection, transaction, request.NodeId, cancellationToken);
+            if (revokedDisplay is null)
+            {
+                return Failure("That relay node is unknown, unidentified, or already revoked.");
             }
 
             await using var revoke = connection.CreateCommand();
@@ -1391,7 +1511,11 @@ public sealed class RelayStore
             fence.Parameters.AddWithValue("$actorId", request.ActorDiscordUserId);
             fence.Parameters.AddWithValue("$now", nowMs);
             await fence.ExecuteNonQueryAsync(cancellationToken);
-            return new BridgeManagementResult(true, false, false, $"Relay node `{request.NodeId}` revoked.");
+            return new BridgeManagementResult(
+                true,
+                false,
+                false,
+                $"Relay node {RelayText.EscapeDiscordMarkdown(revokedDisplay)} revoked.");
         }
 
         return Failure("Unsupported bridge management action.");
@@ -1472,7 +1596,7 @@ public sealed class RelayStore
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT n.node_id, n.label, n.token_hash IS NOT NULL,
+            SELECT n.node_id, n.character_name, n.home_world_id, n.home_world_name, n.token_hash IS NOT NULL,
                    n.capability_reported, n.can_send_to_game, n.revoked_at_ms,
                    CASE WHEN c.preferred_node_id = n.node_id THEN 1 ELSE 0 END,
                    CASE WHEN l.node_id = n.node_id AND l.expires_at_ms > $now THEN 1 ELSE 0 END,
@@ -1480,7 +1604,8 @@ public sealed class RelayStore
             FROM relay_nodes n
             LEFT JOIN community_relay_configuration c ON c.singleton = 1
             CROSS JOIN leader_state l
-            ORDER BY n.label, n.node_id;
+            WHERE n.revoked_at_ms IS NULL
+            ORDER BY n.character_name_normalized, n.home_world_id, n.node_id;
             """;
         command.Parameters.AddWithValue("$now", now.ToUnixTimeMilliseconds());
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1488,14 +1613,16 @@ public sealed class RelayStore
         {
             nodes.Add(new RelayNodeStatus(
                 reader.GetString(0),
-                reader.GetString(1),
-                reader.GetInt64(2) == 1,
-                reader.GetInt64(3) == 1,
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
                 reader.GetInt64(4) == 1,
-                !reader.IsDBNull(5),
+                reader.GetInt64(5) == 1,
                 reader.GetInt64(6) == 1,
-                reader.GetInt64(7) == 1,
-                reader.IsDBNull(8) ? null : DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(8))));
+                !reader.IsDBNull(7),
+                reader.GetInt64(8) == 1,
+                reader.GetInt64(9) == 1,
+                reader.IsDBNull(10) ? null : DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(10))));
         }
 
         return nodes;
@@ -1514,6 +1641,8 @@ public sealed class RelayStore
             JOIN relay_nodes n ON n.node_id = c.preferred_node_id
             WHERE c.singleton = 1
               AND n.revoked_at_ms IS NULL
+              AND n.character_name IS NOT NULL
+              AND n.home_world_id IS NOT NULL
               AND n.can_send_to_game = 1;
             """;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -1523,6 +1652,112 @@ public sealed class RelayStore
         }
 
         return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetInt64(1), reader.GetInt64(2));
+    }
+
+    private static async Task<string?> ReadNodeDisplayAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string nodeId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT character_name, home_world_name
+            FROM relay_nodes
+            WHERE node_id = $nodeId
+              AND revoked_at_ms IS NULL
+              AND token_hash IS NOT NULL
+              AND character_name IS NOT NULL
+              AND home_world_id IS NOT NULL
+              AND home_world_name IS NOT NULL;
+            """;
+        command.Parameters.AddWithValue("$nodeId", nodeId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? RelayText.DisplayNode(reader.GetString(0), reader.GetString(1))
+            : null;
+    }
+
+    private static async Task<bool> ReadIdentityClaimantAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string nodeId,
+        string normalizedCharacterName,
+        long homeWorldId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT COUNT(*)
+            FROM relay_nodes
+            WHERE node_id <> $nodeId
+              AND revoked_at_ms IS NULL
+              AND character_name_normalized = $characterName
+              AND home_world_id = $homeWorldId;
+            """;
+        command.Parameters.AddWithValue("$nodeId", nodeId);
+        command.Parameters.AddWithValue("$characterName", normalizedCharacterName);
+        command.Parameters.AddWithValue("$homeWorldId", homeWorldId);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) > 0;
+    }
+
+    private static async Task<bool> HasNodeIdentityAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string nodeId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT COUNT(*)
+            FROM relay_nodes
+            WHERE node_id = $nodeId
+              AND revoked_at_ms IS NULL
+              AND character_name IS NOT NULL
+              AND home_world_id IS NOT NULL
+              AND home_world_name IS NOT NULL;
+            """;
+        command.Parameters.AddWithValue("$nodeId", nodeId);
+        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) == 1;
+    }
+
+    private static async Task RevokeAndFenceNodeAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string nodeId,
+        long nowMs,
+        string actor,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE relay_nodes
+            SET revoked_at_ms = $now,
+                revoked_by_discord_user_id = $actor,
+                token_hash = NULL,
+                can_send_to_game = 0
+            WHERE node_id = $nodeId AND revoked_at_ms IS NULL;
+            UPDATE community_relay_configuration
+            SET preferred_node_id = CASE WHEN preferred_node_id = $nodeId THEN NULL ELSE preferred_node_id END,
+                revision = CASE WHEN preferred_node_id = $nodeId THEN revision + 1 ELSE revision END,
+                updated_by_discord_user_id = CASE WHEN preferred_node_id = $nodeId THEN $actor ELSE updated_by_discord_user_id END,
+                updated_at_ms = CASE WHEN preferred_node_id = $nodeId THEN $now ELSE updated_at_ms END
+            WHERE singleton = 1;
+            UPDATE leader_state
+            SET epoch = epoch + 1,
+                node_id = NULL,
+                instance_id = NULL,
+                expires_at_ms = 0
+            WHERE singleton = 1 AND node_id = $nodeId;
+            """;
+        command.Parameters.AddWithValue("$nodeId", nodeId);
+        command.Parameters.AddWithValue("$now", nowMs);
+        command.Parameters.AddWithValue("$actor", actor);
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private async Task SeedConfigurationAsync(SqliteConnection connection, CancellationToken cancellationToken)
@@ -1649,7 +1884,51 @@ public sealed class RelayStore
         await alter.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<bool> IsActiveNodeAsync(
+    private static async Task EnsureNodeIdentityIndexAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE relay_nodes
+            SET revoked_at_ms = COALESCE(revoked_at_ms, $now),
+                revoked_by_discord_user_id = COALESCE(revoked_by_discord_user_id, 'identity-migration-conflict'),
+                token_hash = NULL,
+                can_send_to_game = 0
+            WHERE revoked_at_ms IS NULL
+              AND character_name_normalized IS NOT NULL
+              AND home_world_id IS NOT NULL
+              AND rowid NOT IN (
+                  SELECT MIN(rowid)
+                  FROM relay_nodes
+                  WHERE revoked_at_ms IS NULL
+                    AND character_name_normalized IS NOT NULL
+                    AND home_world_id IS NOT NULL
+                  GROUP BY character_name_normalized, home_world_id);
+            UPDATE community_relay_configuration
+            SET preferred_node_id = NULL,
+                revision = revision + 1,
+                updated_by_discord_user_id = 'identity-migration-conflict',
+                updated_at_ms = $now
+            WHERE preferred_node_id IN (SELECT node_id FROM relay_nodes WHERE revoked_at_ms IS NOT NULL);
+            UPDATE leader_state
+            SET epoch = epoch + 1,
+                node_id = NULL,
+                instance_id = NULL,
+                expires_at_ms = 0
+            WHERE node_id IN (SELECT node_id FROM relay_nodes WHERE revoked_at_ms IS NOT NULL);
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_relay_nodes_character_world
+            ON relay_nodes(character_name_normalized, home_world_id)
+            WHERE revoked_at_ms IS NULL
+              AND character_name_normalized IS NOT NULL
+              AND home_world_id IS NOT NULL;
+            """;
+        command.Parameters.AddWithValue("$now", nowMs);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private async Task<bool> IsActiveNodeAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         string nodeId,
@@ -1662,9 +1941,12 @@ public sealed class RelayStore
             FROM relay_nodes
             WHERE node_id = $nodeId
               AND revoked_at_ms IS NULL
-              AND token_hash IS NOT NULL;
+              AND token_hash IS NOT NULL
+              AND ($allowLegacy = 1 OR (
+                  character_name IS NOT NULL AND home_world_id IS NOT NULL AND home_world_name IS NOT NULL));
             """;
         command.Parameters.AddWithValue("$nodeId", nodeId);
+        command.Parameters.AddWithValue("$allowLegacy", options.AllowLegacyHeartbeatWithoutCapability ? 1 : 0);
         return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) == 1;
     }
 

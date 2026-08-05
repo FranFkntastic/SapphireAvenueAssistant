@@ -30,7 +30,16 @@ public sealed record LeaderLease(
     bool IsLeader,
     bool IsPreferred,
     long Epoch,
-    DateTimeOffset ExpiresAtUtc);
+    DateTimeOffset ExpiresAtUtc,
+    string? IdentityConflict = null);
+
+public sealed record RelayNodeIdentity(
+    string CharacterName,
+    long HomeWorldId,
+    string HomeWorldName)
+{
+    public string DisplayName => $"{CharacterName} @ {HomeWorldName}";
+}
 
 public sealed record OutboundRelayMessage(
     string MessageId,
@@ -108,7 +117,9 @@ public sealed record CommunityRelayConfiguration(
 
 public sealed record RelayNodeStatus(
     string NodeId,
-    string Label,
+    string? CharacterName,
+    long? HomeWorldId,
+    string? HomeWorldName,
     bool IsPaired,
     bool CapabilityReported,
     bool CanSendToGame,
@@ -116,6 +127,8 @@ public sealed record RelayNodeStatus(
     bool IsPreferred,
     bool IsLeader,
     DateTimeOffset? LastSeenAtUtc);
+
+public sealed record RelayNodeChoice(string NodeId, string DisplayName);
 
 public enum BridgeManagementAction
 {
@@ -139,8 +152,7 @@ public sealed record BridgeManagementRequest(
     BridgeManagementAction Action,
     string? ChannelId = null,
     string? RoleId = null,
-    string? NodeId = null,
-    string? NodeLabel = null);
+    string? NodeId = null);
 
 public sealed record BridgeManagementResult(
     bool Succeeded,
@@ -150,5 +162,4 @@ public sealed record BridgeManagementResult(
 
 public sealed record PairingExchangeResult(
     string NodeId,
-    string NodeLabel,
     string AccessToken);

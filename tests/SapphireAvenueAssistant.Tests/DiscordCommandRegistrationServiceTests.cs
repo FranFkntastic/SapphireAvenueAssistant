@@ -73,6 +73,10 @@ public sealed class DiscordCommandRegistrationServiceTests
             Assert.Contains("\"default_member_permissions\":\"32\"", bridge.Body, StringComparison.Ordinal);
             Assert.Contains("\"name\":\"add-node\"", bridge.Body, StringComparison.Ordinal);
             Assert.Contains("\"name\":\"pause\"", bridge.Body, StringComparison.Ordinal);
+            Assert.Contains("\"description\":\"Character and home world\"", bridge.Body, StringComparison.Ordinal);
+            Assert.Contains("\"autocomplete\":true", bridge.Body, StringComparison.Ordinal);
+            Assert.DoesNotContain("Friendly node name", bridge.Body, StringComparison.Ordinal);
+            Assert.DoesNotContain("Relay node ID", bridge.Body, StringComparison.Ordinal);
         });
         Assert.DoesNotContain(requests, request => request.Path.Contains("10000000000000010", StringComparison.Ordinal));
     }

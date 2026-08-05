@@ -33,13 +33,13 @@ Discord's Interactions Endpoint URL is `https://<host>/discord/interactions`. Th
 ## Configure a relay
 
 1. A server manager runs `/bridge configure` and selects the relay channel and role allowed to use `/cwls message`.
-2. The manager runs `/bridge add-node` with a friendly installation name. Discord returns a 13-character, ten-minute pairing code ephemerally.
+2. The manager runs `/bridge add-node`. Discord returns a 13-character, ten-minute pairing code ephemerally; after pairing, the node names itself from the logged-in `Character @ Home World`.
 3. The player opens `/sadbridge`, enters the HTTPS coordinator URL and pairing code, and selects a discovered CWLS by name.
-4. The manager may use `/bridge prefer-node` to nominate the relay account. Standbys take over only after the active lease expires.
+4. The manager may use `/bridge prefer-node` to nominate the relay account from character/world autocomplete. Standbys take over only after the active lease expires.
 
 `/bridge status`, `/bridge list-nodes`, `/bridge pause`, `/bridge clear-preference`, and `/bridge revoke-node` remain available while every FFXIV client is offline. The durable node bearer is returned only to the pairing plugin, stored with Windows DPAPI, and never placed in Discord.
 
-Relay nodes use bearer authentication and the `/relay/v1/nodes/{nodeId}` routes. A node must heartbeat with `canSendToGame`, retain the returned instance/epoch lease, claim one outbound line, and complete the claim as `sent`, `not-sent`, or `ambiguous`. During rolling upgrades, an omitted capability remains temporarily eligible only while `Relay.AllowLegacyHeartbeatWithoutCapability` is enabled; disable that compatibility switch after every node reports the field. An expired claim is deliberately sealed as ambiguous instead of being transmitted twice. Revocation clears the credential, preference, and any current lease for that node.
+Relay nodes use bearer authentication and the internal `/relay/v1/nodes/{nodeId}` routes. A node heartbeats with its current character name, canonical home-world ID/name, and `canSendToGame`, then retains the returned instance/epoch lease, claims one outbound line, and completes the claim as `sent`, `not-sent`, or `ambiguous`. Character/world is display context, never authority; duplicate claims revoke and fence the newer installation. During rolling upgrades, omitted modern heartbeat fields remain temporarily eligible only while `Relay.AllowLegacyHeartbeatWithoutCapability` is enabled; disable that compatibility switch after every node reports them. An expired claim is deliberately sealed as ambiguous instead of being transmitted twice.
 
 Expose Discord and relay routes only through HTTPS. A relay bearer token grants permission to publish observations and, while that node owns the current epoch, claim Discord-to-game work.
 

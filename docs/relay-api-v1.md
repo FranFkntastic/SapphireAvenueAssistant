@@ -13,7 +13,7 @@ Content-Type: application/json
 {"pairingCode":"ABCDEFG234567"}
 ```
 
-A successful response returns `nodeId`, `nodeLabel`, and a 256-bit base64url `accessToken`. The coordinator stores only hashes of the pairing code and bearer token. Unknown, expired, consumed, or revoked codes return `401` without credential material. Plain HTTP returns `400`; a TLS-terminating reverse proxy is accepted only from loopback with `X-Forwarded-Proto: https` in the current deployment topology.
+A successful response returns an internal `nodeId` and a 256-bit base64url `accessToken`. The coordinator stores only hashes of the pairing code and bearer token. Unknown, expired, consumed, or revoked codes return `401` without credential material. Plain HTTP returns `400`; a TLS-terminating reverse proxy is accepted only from loopback with `X-Forwarded-Proto: https` in the current deployment topology.
 
 ## Heartbeat and leadership
 
@@ -22,11 +22,14 @@ A successful response returns `nodeId`, `nodeLabel`, and a 256-bit base64url `ac
 ```json
 {
   "instanceId": "random-per-client-start",
-  "canSendToGame": true
+  "canSendToGame": true,
+  "characterName": "Mega Phone",
+  "homeWorldId": 40,
+  "homeWorldName": "Sargatanas"
 }
 ```
 
-The response contains `role`, `isPreferred`, `epoch`, and `expiresAtUtc`. `canSendToGame` must reflect the current node's Discord-to-game direction, login state, and exact CWLS eligibility; an ineligible leader releases and fences its lease. During a rolling upgrade, a legacy client that omits this field is temporarily eligible only while `Relay.AllowLegacyHeartbeatWithoutCapability` is enabled. Disable that compatibility switch after every node has upgraded. Heartbeat well before expiry. Only a `leader` may claim Discord-to-game lines; a new leader receives a larger epoch after the old lease expires, and the previous epoch is permanently fenced. A configured preferred node gets the next available lease but never preempts a live leader.
+The response contains `role`, `isPreferred`, `epoch`, and `expiresAtUtc`. Character/world is display context only; the bearer and current lease remain authoritative. A second active node reporting the same normalized character name and home-world ID receives `409`, is revoked, and cannot claim, complete, or publish observations. Missing transient game context preserves the last reported identity. `canSendToGame` must reflect the current node's Discord-to-game direction, login state, and exact CWLS eligibility; an ineligible leader releases and fences its lease. During a rolling upgrade, a legacy client that omits modern heartbeat fields is temporarily eligible only while `Relay.AllowLegacyHeartbeatWithoutCapability` is enabled. Disable that compatibility switch after every node has upgraded. Heartbeat well before expiry. Only a `leader` may claim Discord-to-game lines; a new leader receives a larger epoch after the old lease expires, and the previous epoch is permanently fenced. A configured preferred node gets the next available lease but never preempts a live leader.
 
 ## Discord to game
 

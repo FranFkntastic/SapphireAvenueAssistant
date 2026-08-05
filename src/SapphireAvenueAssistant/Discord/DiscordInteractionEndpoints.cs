@@ -56,7 +56,7 @@ public static class DiscordInteractionEndpoints
                         return Results.Json(new { type = 1 });
                     }
 
-                    if (interactionType != 2 ||
+                    if (interactionType is not 2 and not 4 ||
                         !TryGetString(root, "id", out var interactionId) ||
                         !DiscordOptions.IsSnowflake(interactionId) ||
                         !TryGetString(root, "guild_id", out var guildId) ||
@@ -69,13 +69,30 @@ public static class DiscordInteractionEndpoints
 
                     if (!string.Equals(guildId, options.Discord.GuildId, StringComparison.Ordinal))
                     {
-                        return InteractionError("This Discord server is not connected to this relay.");
+                        return interactionType == 4
+                            ? AutocompleteResponse([])
+                            : InteractionError("This Discord server is not connected to this relay.");
                     }
 
                     if (!TryReadMember(root, out var userId, out var displayName, out var roles) ||
                         !DiscordOptions.IsSnowflake(userId))
                     {
-                        return InteractionError("A server member identity is required.");
+                        return interactionType == 4
+                            ? AutocompleteResponse([])
+                            : InteractionError("A server member identity is required.");
+                    }
+
+                    if (interactionType == 4)
+                    {
+                        if (!string.Equals(commandName, "bridge", StringComparison.Ordinal) ||
+                            !HasManageGuildPermission(root) ||
+                            !TryReadNodeAutocomplete(data, out var query))
+                        {
+                            return AutocompleteResponse([]);
+                        }
+
+                        var choices = await store.SearchNodeChoicesAsync(guildId, query, cancellationToken);
+                        return AutocompleteResponse(choices);
                     }
 
                     if (string.Equals(commandName, "bridge", StringComparison.Ordinal))
@@ -156,6 +173,20 @@ public static class DiscordInteractionEndpoints
             }
         });
 
+    private static IResult AutocompleteResponse(IReadOnlyList<RelayNodeChoice> choices) =>
+        Results.Json(new
+        {
+            type = 8,
+            data = new
+            {
+                choices = choices.Select(choice => new
+                {
+                    name = choice.DisplayName.Length <= 100 ? choice.DisplayName : choice.DisplayName[..100],
+                    value = choice.NodeId
+                })
+            }
+        });
+
     private static bool HasManageGuildPermission(JsonElement root)
     {
         const ulong administrator = 1UL << 3;
@@ -201,8 +232,7 @@ public static class DiscordInteractionEndpoints
                 New(BridgeManagementAction.SetRole) with { RoleId = roleId },
             "pause" when TryReadBooleanOption(subcommand, "paused", out var paused) =>
                 New(paused ? BridgeManagementAction.Pause : BridgeManagementAction.Resume),
-            "add-node" when TryReadOption(subcommand, "name", out var nodeLabel) =>
-                New(BridgeManagementAction.AddNode) with { NodeLabel = nodeLabel },
+            "add-node" => New(BridgeManagementAction.AddNode),
             "prefer-node" when TryReadOption(subcommand, "node", out var preferredNode) =>
                 New(BridgeManagementAction.PreferNode) with { NodeId = preferredNode },
             "revoke-node" when TryReadOption(subcommand, "node", out var revokedNode) =>
@@ -228,6 +258,40 @@ public static class DiscordInteractionEndpoints
             if (TryGetString(option, "name", out var name) && name == optionName &&
                 TryGetString(option, "value", out value))
             {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryReadNodeAutocomplete(JsonElement data, out string query)
+    {
+        query = string.Empty;
+        if (!data.TryGetProperty("options", out var options) ||
+            options.ValueKind != JsonValueKind.Array ||
+            options.GetArrayLength() != 1)
+        {
+            return false;
+        }
+
+        var subcommand = options[0];
+        if (!TryGetString(subcommand, "name", out var subcommandName) ||
+            subcommandName is not "prefer-node" and not "revoke-node" ||
+            !subcommand.TryGetProperty("options", out var arguments) ||
+            arguments.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var argument in arguments.EnumerateArray())
+        {
+            if (TryGetString(argument, "name", out var name) && name == "node" &&
+                argument.TryGetProperty("focused", out var focused) && focused.ValueKind == JsonValueKind.True)
+            {
+                query = argument.TryGetProperty("value", out var value) && value.ValueKind == JsonValueKind.String
+                    ? value.GetString() ?? string.Empty
+                    : string.Empty;
                 return true;
             }
         }

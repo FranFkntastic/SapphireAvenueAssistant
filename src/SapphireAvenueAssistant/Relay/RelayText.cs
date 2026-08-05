@@ -53,4 +53,10 @@ public static class RelayText
 
         return builder.ToString();
     }
+
+    public static string NormalizeIdentityKey(string value) =>
+        value.Normalize(NormalizationForm.FormKC).ToUpperInvariant();
+
+    public static string DisplayNode(string characterName, string homeWorldName) =>
+        $"{characterName} @ {homeWorldName}";
 }

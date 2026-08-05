@@ -48,7 +48,7 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
 
         DrawSectionTitle("This relay node");
         if (snapshot.CoordinatorConfigured)
-            DrawPairedNode();
+            DrawPairedNode(snapshot);
         else
             DrawPairing();
 
@@ -97,14 +97,15 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
                 : MutedColor;
         ImGui.TextColored(color, $"● {display.Label}");
         ImGui.SameLine();
-        var identity = string.IsNullOrWhiteSpace(snapshot.Character) ? "This installation" : snapshot.Character;
+        var identity = RelayConfigurationPolicy.DisplayNodeIdentity(snapshot.Character, snapshot.HomeWorld);
         ImGui.Text(identity);
         ImGui.TextColored(MutedColor, display.Detail);
     }
 
-    private void DrawPairedNode()
+    private void DrawPairedNode(RelaySnapshot snapshot)
     {
-        DrawLabel("Node", string.IsNullOrWhiteSpace(configuration.NodeLabel) ? configuration.NodeId : configuration.NodeLabel);
+        var identity = RelayConfigurationPolicy.DisplayNodeIdentity(snapshot.Character, snapshot.HomeWorld);
+        DrawLabel("Node", identity);
         DrawLabel("Coordinator", configuration.CoordinatorBaseUrl);
         ImGui.TextColored(MutedColor, "Pairing credentials are protected for this Windows user and aren't shown here.");
     }
@@ -208,7 +209,7 @@ internal sealed class RelayConfigurationWindow : Window, IDisposable
             coordinatorUrl = configuration.CoordinatorBaseUrl;
             pairingCode = string.Empty;
             actionFailed = false;
-            actionMessage = $"Paired as {pairing.NodeLabel}. Relay directions remain disabled.";
+            actionMessage = "Paired. Log in to report this node's character and home world; relay directions remain disabled.";
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {

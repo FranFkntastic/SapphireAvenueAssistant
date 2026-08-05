@@ -39,6 +39,7 @@ internal sealed class CwlsRelayWorker : IDisposable
     private long epoch;
     private DateTimeOffset? leaseExpiresAtUtc;
     private string? lastError;
+    private bool identityConflictDetected;
 
     public CwlsRelayWorker(
         IDalamudPluginInterface pluginInterface,
@@ -65,7 +66,14 @@ internal sealed class CwlsRelayWorker : IDisposable
 
     public string RuntimeInstanceId => runtimeInstanceId;
 
-    public void MarkDisabled() => SetDisabled();
+    public void MarkDisabled()
+    {
+        lock (gate)
+        {
+            identityConflictDetected = false;
+            SetDisabledUnsafe();
+        }
+    }
 
     public RelaySnapshot CreateSnapshot()
     {
@@ -74,12 +82,14 @@ internal sealed class CwlsRelayWorker : IDisposable
         var slotMatches = IsExactSlotMatch(actualName);
         var sendEligibility = EvaluateLocalSendEligibility(requireDirection: true, slots);
         var player = objectTable.LocalPlayer;
+        var identity = ReadGameIdentity(player);
         lock (gate)
         {
             return new RelaySnapshot(
                 "sapphire-avenue-relay.snapshot.v1",
                 clientState.IsLoggedIn,
-                player?.Name.TextValue,
+                identity.CharacterName,
+                identity.HomeWorldName,
                 slots,
                 configuration.CwlsSlot,
                 configuration.ExpectedCwlsName,
@@ -110,7 +120,6 @@ internal sealed class CwlsRelayWorker : IDisposable
     {
         var coordinatorUri = RelayCoordinatorClient.ValidateBaseUri(coordinatorBaseUrl);
         if (!RelayConfigurationPolicy.IsNodeIdValid(pairing.NodeId) ||
-            !RelayConfigurationPolicy.IsNodeLabelValid(pairing.NodeLabel) ||
             !RelayConfigurationPolicy.IsAccessTokenValid(pairing.AccessToken))
         {
             throw new InvalidOperationException("The coordinator returned an invalid node identity or credential.");
@@ -125,8 +134,9 @@ internal sealed class CwlsRelayWorker : IDisposable
             configuration.DiscordToGameEnabled = false;
             configuration.CoordinatorBaseUrl = coordinatorUri.AbsoluteUri;
             configuration.NodeId = pairing.NodeId;
-            configuration.NodeLabel = pairing.NodeLabel.Trim();
+            configuration.NodeLabel = string.Empty;
             configuration.RelayProtectedAccessToken = protectedToken;
+            identityConflictDetected = false;
             SetDisabledUnsafe();
             configuration.Save(pluginInterface);
         }
@@ -179,6 +189,7 @@ internal sealed class CwlsRelayWorker : IDisposable
             configuration.RelayProtectedAccessToken = string.Empty;
             configuration.CwlsSlot = 0;
             configuration.ExpectedCwlsName = string.Empty;
+            identityConflictDetected = false;
             SetDisabledUnsafe();
             configuration.Save(pluginInterface);
         }
@@ -265,22 +276,26 @@ internal sealed class CwlsRelayWorker : IDisposable
         {
             try
             {
-                if (!configuration.ObserveToDiscordEnabled && !configuration.DiscordToGameEnabled)
-                {
-                    SetDisabled();
-                }
-                else if (!RelayConfigurationPolicy.IsCoordinatorConfigured(configuration))
+                if (!RelayConfigurationPolicy.IsCoordinatorConfigured(configuration))
                 {
                     SetDisconnected("Relay coordinator is not configured.");
                 }
+                else if (HasIdentityConflict())
+                {
+                    // The coordinator revoked this credential. A new pairing is required;
+                    // retrying would only hammer a permanently fenced identity.
+                }
                 else
                 {
-                    var sendEligibility = await framework.RunOnTick(
-                        () => GetEligibility(requireDirection: true),
+                    var cycle = await framework.RunOnTick(
+                        () => new RelayCycleContext(
+                            GetEligibility(requireDirection: true),
+                            ReadGameIdentity(objectTable.LocalPlayer)),
                         cancellationToken: cancellationToken).ConfigureAwait(false);
                     var heartbeat = await coordinator.HeartbeatAsync(
                         runtimeInstanceId,
-                        sendEligibility.Allowed,
+                        cycle.SendEligibility.Allowed,
+                        cycle.Identity,
                         cancellationToken).ConfigureAwait(false);
                     lock (gate)
                     {
@@ -290,13 +305,13 @@ internal sealed class CwlsRelayWorker : IDisposable
                         epoch = heartbeat.Epoch;
                         leaseExpiresAtUtc = heartbeat.ExpiresAtUtc;
                         lastError = null;
-                        if (configuration.DiscordToGameEnabled && !sendEligibility.Allowed)
-                            lastError = sendEligibility.Reason;
+                        if (configuration.DiscordToGameEnabled && !cycle.SendEligibility.Allowed)
+                            lastError = cycle.SendEligibility.Reason;
                     }
 
                     await FlushObservationsAsync(cancellationToken).ConfigureAwait(false);
                     if (configuration.DiscordToGameEnabled &&
-                        sendEligibility.Allowed &&
+                        cycle.SendEligibility.Allowed &&
                         string.Equals(heartbeat.Role, "leader", StringComparison.OrdinalIgnoreCase))
                     {
                         await ClaimAndSendAsync(heartbeat.Epoch, cancellationToken).ConfigureAwait(false);
@@ -306,6 +321,19 @@ internal sealed class CwlsRelayWorker : IDisposable
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 break;
+            }
+            catch (NodeIdentityConflictException exception)
+            {
+                lock (gate)
+                {
+                    identityConflictDetected = true;
+                    coordinatorReachable = true;
+                    role = "identity-conflict";
+                    isPreferred = false;
+                    leaseExpiresAtUtc = null;
+                    lastError = exception.Message;
+                }
+                log.Error(exception, "Relay pairing was revoked because its character and home world are already claimed.");
             }
             catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or InvalidDataException)
             {
@@ -561,6 +589,24 @@ internal sealed class CwlsRelayWorker : IDisposable
     private bool IsLocalPlayer(string senderName) =>
         string.Equals(objectTable.LocalPlayer?.Name.TextValue, senderName, StringComparison.Ordinal);
 
+    private bool HasIdentityConflict()
+    {
+        lock (gate)
+            return identityConflictDetected;
+    }
+
+    private static RelayGameIdentity ReadGameIdentity(Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter? player)
+    {
+        if (player is null)
+            return new RelayGameIdentity(null, null, null);
+
+        var characterName = CwlsChannels.Normalize(player.Name.TextValue, 64);
+        var homeWorldName = CwlsChannels.Normalize(player.HomeWorld.ValueNullable?.Name.ToString(), 64);
+        return characterName is null || homeWorldName is null || player.HomeWorld.RowId == 0
+            ? new RelayGameIdentity(null, null, null)
+            : new RelayGameIdentity(characterName, player.HomeWorld.RowId, homeWorldName);
+    }
+
     private List<ObservationEnvelope> LoadOutbox()
     {
         if (!File.Exists(outboxPath))
@@ -604,12 +650,6 @@ internal sealed class CwlsRelayWorker : IDisposable
         }
     }
 
-    private void SetDisabled()
-    {
-        lock (gate)
-            SetDisabledUnsafe();
-    }
-
     private void SetDisabledUnsafe()
     {
         coordinatorReachable = false;
@@ -629,6 +669,7 @@ internal sealed class CwlsRelayWorker : IDisposable
 
     private sealed record SendSubmission(bool Submitted, string Detail);
     private sealed record SendAttemptResult(DeliveryOutcome Outcome, string Detail);
+    private sealed record RelayCycleContext(RelaySendEligibility SendEligibility, RelayGameIdentity Identity);
 }
 
 internal sealed record RelayTestReceipt(
