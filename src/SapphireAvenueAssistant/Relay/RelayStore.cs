@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using SapphireAvenue.BridgeProtocol;
 using SapphireAvenueAssistant.Configuration;
 using System.Security.Cryptography;
 using System.Text;
@@ -281,7 +282,7 @@ public sealed class RelayStore
         DateTimeOffset now,
         CancellationToken cancellationToken = default)
     {
-        var normalizedCode = NormalizePairingCode(pairingCode);
+        var normalizedCode = RelayConnectionBootstrap.NormalizePairingCode(pairingCode);
         if (normalizedCode is null)
         {
             return null;
@@ -1363,8 +1364,15 @@ public sealed class RelayStore
 
         if (request.Action == BridgeManagementAction.AddNode)
         {
+            if (!options.CanIssueConnectionStrings)
+            {
+                return Failure(
+                    "This bot's coordinator address is not configured. Ask its server operator to set the exact public HTTPS URL.");
+            }
+
             var nodeId = $"node-{Base64UrlEncode(RandomNumberGenerator.GetBytes(9))}";
             var pairingCode = GeneratePairingCode();
+            var connectionString = RelayConnectionBootstrap.Create(options.PublicBaseUrl, pairingCode);
             await using var add = connection.CreateCommand();
             add.Transaction = transaction;
             add.CommandText = """
@@ -1389,7 +1397,7 @@ public sealed class RelayStore
                 true,
                 false,
                 false,
-                $"Pair a relay installation within 10 minutes using code `{pairingCode}`. Its node name will appear automatically as the logged-in character and home world. This code is shown only here; the durable access token is returned only to the relay installation.");
+                $"Paste this entire connection string into `/sadbridge` within 10 minutes:\n```text\n{connectionString}\n```\nThe destination host is shown in the string. It can be used once; the durable access token is returned only to the relay installation.");
         }
 
         if (request.Action == BridgeManagementAction.ClearPreference)
@@ -1807,22 +1815,6 @@ public sealed class RelayStore
     }
 
     private static byte[] HashSecret(string value) => SHA256.HashData(Encoding.UTF8.GetBytes(value));
-
-    private static string? NormalizePairingCode(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return null;
-        }
-
-        var normalized = new string(value
-            .Where(character => character is not '-' and not ' ')
-            .Select(char.ToUpperInvariant)
-            .ToArray());
-        return normalized.Length == 13 && normalized.All(character => "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".Contains(character))
-            ? normalized
-            : null;
-    }
 
     private static string GeneratePairingCode()
     {

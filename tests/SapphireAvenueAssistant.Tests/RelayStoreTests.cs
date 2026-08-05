@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using SapphireAvenue.BridgeProtocol;
 using SapphireAvenueAssistant.Configuration;
 using SapphireAvenueAssistant.Relay;
 using System.Text.RegularExpressions;
@@ -245,11 +246,16 @@ public sealed class RelayStoreTests
             "100000000000000111", "10000000000000002", "10000000000000005",
             BridgeManagementAction.AddNode);
         var issued = await fixture.Store.ApplyBridgeManagementAsync(request, now);
-        var code = Regex.Match(issued.Response, "`([A-Z2-7]{13})`").Groups[1].Value;
+        var bootstrapMatch = Regex.Match(
+            issued.Response,
+            @"SADB1 (https://[^\s`]+) ([A-Z2-7]{13})");
+        var code = bootstrapMatch.Groups[2].Value;
 
         Assert.True(issued.Succeeded);
+        Assert.True(bootstrapMatch.Success);
+        Assert.Equal("https://relay.example/community/", bootstrapMatch.Groups[1].Value);
         Assert.Equal(13, code.Length);
-        Assert.Contains("logged-in character and home world", issued.Response, StringComparison.Ordinal);
+        Assert.Contains("Paste this entire connection string", issued.Response, StringComparison.Ordinal);
         var exchanged = await fixture.Store.ExchangePairingCodeAsync(code, now.AddMinutes(1));
         Assert.NotNull(exchanged);
         Assert.True(await fixture.Store.AuthorizeNodeAsync(exchanged.NodeId, exchanged.AccessToken));
@@ -266,8 +272,25 @@ public sealed class RelayStoreTests
         var expiring = await fixture.Store.ApplyBridgeManagementAsync(
             request with { InteractionId = "100000000000000112", NodeId = null },
             now);
-        var expiringCode = Regex.Match(expiring.Response, "`([A-Z2-7]{13})`").Groups[1].Value;
+        var expiringCode = Regex.Match(expiring.Response, @"SADB1 https://[^\s`]+ ([A-Z2-7]{13})").Groups[1].Value;
         Assert.Null(await fixture.Store.ExchangePairingCodeAsync(expiringCode, now.AddMinutes(11)));
+    }
+
+    [Fact]
+    public async Task AddNodeFailsWithoutConfiguredPublicCoordinatorUrlAndCreatesNoBootstrap()
+    {
+        await using var fixture = await StoreFixture.CreateAsync(publicBaseUrl: string.Empty);
+        var nodeCountBefore = await fixture.Store.CountActiveNodesAsync();
+        var issued = await fixture.Store.ApplyBridgeManagementAsync(
+            new BridgeManagementRequest(
+                "100000000000000119", "10000000000000002", "10000000000000005",
+                BridgeManagementAction.AddNode),
+            DateTimeOffset.Parse("2026-08-04T12:00:00Z"));
+
+        Assert.False(issued.Succeeded);
+        Assert.Contains("coordinator address is not configured", issued.Response, StringComparison.Ordinal);
+        Assert.DoesNotContain(RelayConnectionBootstrap.VersionToken, issued.Response, StringComparison.Ordinal);
+        Assert.Equal(nodeCountBefore, await fixture.Store.CountActiveNodesAsync());
     }
 
     [Fact]
@@ -789,7 +812,9 @@ public sealed class RelayStoreTests
 
         public RelayStore Store { get; }
 
-        public static async Task<StoreFixture> CreateAsync(Dictionary<string, string>? nodeTokens = null)
+        public static async Task<StoreFixture> CreateAsync(
+            Dictionary<string, string>? nodeTokens = null,
+            string publicBaseUrl = "https://relay.example/community")
         {
             var databasePath = Path.Combine(
                 Path.GetTempPath(),
@@ -804,6 +829,7 @@ public sealed class RelayStoreTests
                 Relay = new RelayOptions
                 {
                     DatabasePath = databasePath,
+                    PublicBaseUrl = publicBaseUrl,
                     LeaderLeaseSeconds = 10,
                     ClaimLeaseSeconds = 5,
                     PublishLeaseSeconds = 5,

@@ -62,12 +62,14 @@ app.MapGet(
             sapphireOptions.Discord.CanPublish &&
             relayConfiguration is not null &&
             relayNodes > 0 &&
+            sapphireOptions.Relay.CanIssueConnectionStrings &&
             commandRegistration.Status == "ready"
                 ? "ready"
                 : "configuration-required",
             discordInteractions = sapphireOptions.Discord.CanVerifyInteractions,
             discordPublication = sapphireOptions.Discord.CanPublish,
             discordCommands = commandRegistration.Status,
+            pairingBootstrap = sapphireOptions.Relay.CanIssueConnectionStrings,
             relayConfigured = relayConfiguration is not null,
             relayNodes
         });

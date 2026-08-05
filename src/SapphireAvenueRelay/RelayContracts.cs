@@ -16,6 +16,7 @@ internal sealed record HeartbeatResponse(
     bool IsPreferred = false);
 internal sealed record PairNodeRequest(string PairingCode);
 internal sealed record PairNodeResponse(string NodeId, string AccessToken);
+internal sealed record RelayPairingResult(string CoordinatorBaseUrl, string NodeId, string AccessToken);
 internal sealed record ClaimRequest(string InstanceId, long Epoch);
 internal sealed record OutboundRelayMessage(
     string MessageId,

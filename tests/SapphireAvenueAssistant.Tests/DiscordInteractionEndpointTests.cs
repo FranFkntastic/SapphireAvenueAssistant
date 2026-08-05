@@ -122,6 +122,7 @@ public sealed class DiscordInteractionEndpointTests
             Relay = new RelayOptions
             {
                 DatabasePath = databasePath,
+                PublicBaseUrl = "https://relay.example/community",
                 NodeTokens = new Dictionary<string, string>(StringComparer.Ordinal)
                 {
                     ["relay-a"] = "token-a",
@@ -177,6 +178,20 @@ public sealed class DiscordInteractionEndpointTests
             .GetCommunityConfigurationAsync("10000000000000002");
         Assert.Equal(2, stored!.Revision);
         Assert.Equal("10000000000000007", stored.AllowedRoleId);
+
+        var addNode = BridgePayload(
+            "10000000000000202", "32", "10000000000000002", "10000000000000001",
+            new { name = "add-node", type = 1 });
+        using var issued = await PostSignedAsync(client, addNode, timestamp, expandedPrivateKey);
+        using var issuedBody = JsonDocument.Parse(await issued.Content.ReadAsStringAsync());
+        var issuedData = issuedBody.RootElement.GetProperty("data");
+        var connectionString = issuedData.GetProperty("content").GetString();
+        Assert.True(issued.IsSuccessStatusCode);
+        Assert.Equal(64, issuedData.GetProperty("flags").GetInt32());
+        Assert.Matches(
+            @"SADB1 https://relay\.example/community/ [A-Z2-7]{13}",
+            connectionString ?? string.Empty);
+        Assert.Empty(issuedData.GetProperty("allowed_mentions").GetProperty("parse").EnumerateArray());
 
         var store = factory.Services.GetRequiredService<RelayStore>();
         var now = DateTimeOffset.Parse("2026-08-04T12:00:00Z");

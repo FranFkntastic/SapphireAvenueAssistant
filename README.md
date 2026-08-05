@@ -2,7 +2,7 @@
 
 Sapphire Avenue Discord Bridge is a fail-closed bridge between a community-owned Discord bot/channel and one FFXIV cross-world linkshell. Sapphire Avenue is the maker's mark, not a server restriction. The repository contains the durable Discord coordinator and `SapphireAvenueRelay`, the Dalamud relay node.
 
-The plugin starts with both directions disabled. A Discord server manager creates a short-lived node code with `/bridge add-node`; the player enters that code and the HTTPS coordinator address in `/sadbridge`, then selects a CWLS by name from the character's current memberships. Every observation and send rechecks the saved slot/name pair, so a reordered or missing CWLS pauses the relay instead of writing into another chat.
+The plugin starts with both directions disabled. A Discord server manager creates a short-lived connection string with `/bridge add-node`; the player pastes that single value into `/sadbridge`, then selects a CWLS by name from the character's current memberships. Every observation and send rechecks the saved slot/name pair, so a reordered or missing CWLS pauses the relay instead of writing into another chat.
 
 Game-bound messages use one epoch-fenced coordinator leader. A send is reported as successful only after the plugin observes the matching CWLS echo from the local character; missing echoes and uncertain failures are sealed as ambiguous rather than retried.
 
@@ -25,6 +25,7 @@ $env:SapphireAvenue__Discord__ApplicationId = '<discord-application-id>'
 $env:SapphireAvenue__Discord__GuildId = '<discord-server-id>'
 $env:SapphireAvenue__Discord__ChannelId = '<initial-relay-channel-id>'
 $env:SapphireAvenue__Discord__AllowedRoleIds__0 = '<initial-message-role-id>'
+$env:SapphireAvenue__Relay__PublicBaseUrl = 'https://relay.example/community/'
 dotnet run --project .\src\SapphireAvenueAssistant
 ```
 
@@ -33,8 +34,8 @@ Discord's Interactions Endpoint URL is `https://<host>/discord/interactions`. Th
 ## Configure a relay
 
 1. A server manager runs `/bridge configure` and selects the relay channel and role allowed to use `/cwls message`.
-2. The manager runs `/bridge add-node`. Discord returns a 13-character, ten-minute pairing code ephemerally; after pairing, the node names itself from the logged-in `Character @ Home World`.
-3. The player opens `/sadbridge`, enters the HTTPS coordinator URL and pairing code, and selects a discovered CWLS by name.
+2. The manager runs `/bridge add-node`. Discord returns one ephemeral `SADB1 <HTTPS coordinator> <ten-minute code>` connection string; after pairing, the node names itself from the logged-in `Character @ Home World`.
+3. The player opens `/sadbridge`, pastes the entire connection string, and selects a discovered CWLS by name. The plugin validates the visible HTTPS destination, refuses redirects, and saves it only after the one-time exchange succeeds.
 4. The manager may use `/bridge prefer-node` to nominate the relay account from character/world autocomplete. Standbys take over only after the active lease expires.
 
 `/bridge status`, `/bridge list-nodes`, `/bridge pause`, `/bridge clear-preference`, and `/bridge revoke-node` remain available while every FFXIV client is offline. The durable node bearer is returned only to the pairing plugin, stored with Windows DPAPI, and never placed in Discord.

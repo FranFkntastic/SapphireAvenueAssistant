@@ -1,4 +1,5 @@
 using Dalamud.Game.Text;
+using SapphireAvenue.BridgeProtocol;
 using Xunit;
 
 namespace SapphireAvenueRelay.Tests;
@@ -135,6 +136,42 @@ public sealed class RelayBoundaryTests
         Assert.Equal(
             "Waiting for a logged-in character",
             RelayConfigurationPolicy.DisplayNodeIdentity(null, null));
+    }
+
+    [Fact]
+    public void DiscordConnectionStringIsTransparentVersionedAndCanonical()
+    {
+        var value = RelayConnectionBootstrap.Create(
+            "https://relay.example/community",
+            "abcd-efgh-ijk2-3");
+        var parsed = RelayConnectionBootstrap.Parse(value);
+
+        Assert.Equal("SADB1 https://relay.example/community/ ABCDEFGHIJK23", value);
+        Assert.Equal("https://relay.example/community/", parsed.CoordinatorBaseUri.AbsoluteUri);
+        Assert.Equal("ABCDEFGHIJK23", parsed.PairingCode);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("ABCDEFGHIJK23")]
+    [InlineData("SADB2 https://relay.example/ ABCDEFGHIJK23")]
+    [InlineData("SADB1 http://relay.example/ ABCDEFGHIJK23")]
+    [InlineData("SADB1 https://user:pass@relay.example/ ABCDEFGHIJK23")]
+    [InlineData("SADB1 https://relay.example/?redirect=elsewhere ABCDEFGHIJK23")]
+    [InlineData("SADB1 https://relay.example/#fragment ABCDEFGHIJK23")]
+    [InlineData("SADB1 https://relay.example/ INVALID-CODE")]
+    [InlineData("SADB1 https://relay.example/ ABCDEFGHIJK23 extra")]
+    public void DiscordConnectionStringRejectsMalformedOrUnsafeValues(string value)
+    {
+        Assert.Throws<InvalidOperationException>(() => RelayConnectionBootstrap.Parse(value));
+    }
+
+    [Fact]
+    public void DiscordConnectionStringRejectsOversizedCoordinatorAddress()
+    {
+        var oversized = $"SADB1 https://relay.example/{new string('a', 901)} ABCDEFGHIJK23";
+
+        Assert.Throws<InvalidOperationException>(() => RelayConnectionBootstrap.Parse(oversized));
     }
 
     [Fact]

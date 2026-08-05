@@ -2,6 +2,8 @@
 
 Every authenticated route is under `/relay/v1/nodes/{nodeId}` and requires `Authorization: Bearer <node-token>`. A one-time pairing exchange issues the node identity and token; the plugin stores only its own values. Use this API only over HTTPS because the bearer credential grants relay authority.
 
+The Discord bootstrap is a single transparent line: `SADB1 <coordinator-base-url> <pairing-code>`. The coordinator emits it only when `SapphireAvenue:Relay:PublicBaseUrl` is configured as an HTTPS URL without credentials, query, or fragment. The client validates the full value before network activity, refuses redirects, and persists the normalized base URL only with the credential returned by that successful exchange.
+
 ## One-time node pairing
 
 An authorized Discord server manager creates a node with `/bridge add-node`. The returned 13-character Base32 code expires after ten minutes and is displayed only in the ephemeral interaction response. Exchange it once over HTTPS:
