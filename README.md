@@ -10,7 +10,7 @@ The plugin exposes an authenticated local Agent Bridge manifest and allowlisted 
 
 The first release boundary is deliberately one coordinator deployment per community-owned Discord application and guild. Shared multi-community hosting is not implied: the relay message, observation, and lease tables are not tenant-partitioned yet.
 
-V1 accepts signed `/cwls message` and `/bridge` Discord interactions, persists game-bound work and management revisions, elects exactly one transmitting relay with a short epoch-fenced lease, and publishes idempotent CWLS observations back to the configured Discord channel. A preferred relay node wins an available lease, but never preempts a live sender. The included game plugin consumes that versioned HTTP contract; this repository does not automate Square Enix account creation, login, or client operation.
+V1 accepts signed `/cwls message` and `/bridge` Discord interactions, persists game-bound work and management revisions, and elects exactly one relay with a short epoch-fenced lease. Only that leader may send into the game or publish observed CWLS lines back to Discord; standby input is discarded. A preferred relay node wins an available lease, but never preempts a live leader. The included game plugin consumes that versioned HTTP contract; this repository does not automate Square Enix account creation, login, or client operation.
 
 Run one coordinator process against its local SQLite database. The relay *node* pool is highly available, but coordinator replication is not part of v1; multiple service processes would need a shared transactional authority before they could safely elect one game sender.
 
@@ -42,7 +42,7 @@ Discord's Interactions Endpoint URL is `https://<host>/discord/interactions`. Th
 
 Relay nodes use bearer authentication and the internal `/relay/v1/nodes/{nodeId}` routes. A node heartbeats with its current character name, canonical home-world ID/name, and `canSendToGame`, then retains the returned instance/epoch lease, claims one outbound line, and completes the claim as `sent`, `not-sent`, or `ambiguous`. Character/world is display context, never authority; duplicate claims revoke and fence the newer installation. During rolling upgrades, omitted modern heartbeat fields remain temporarily eligible only while `Relay.AllowLegacyHeartbeatWithoutCapability` is enabled; disable that compatibility switch after every node reports them. An expired claim is deliberately sealed as ambiguous instead of being transmitted twice.
 
-Expose Discord and relay routes only through HTTPS. A relay bearer token grants permission to publish observations and, while that node owns the current epoch, claim Discord-to-game work.
+Expose Discord and relay routes only through HTTPS. A relay bearer token authenticates the node, but only the current unexpired node/instance/epoch lease may publish observations or claim Discord-to-game work.
 
 ## Linux service deployment
 

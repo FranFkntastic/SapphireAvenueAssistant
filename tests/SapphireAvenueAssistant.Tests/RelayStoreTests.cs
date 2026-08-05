@@ -154,11 +154,14 @@ public sealed class RelayStoreTests
             "Hello from the CWLS.",
             now);
 
-        var first = await fixture.Store.EnqueueObservationAsync("relay-a", observation, now);
-        var duplicate = await fixture.Store.EnqueueObservationAsync("relay-b", observation, now.AddSeconds(1));
+        var lease = await fixture.Store.HeartbeatAsync("relay-a", "instance-a", now);
+        var first = await fixture.Store.EnqueueObservationAsync(
+            "relay-a", "instance-a", lease.Epoch, observation, now.AddSeconds(1));
+        var duplicate = await fixture.Store.EnqueueObservationAsync(
+            "relay-a", "instance-a", lease.Epoch, observation, now.AddSeconds(2));
         var publish = await fixture.Store.ClaimDiscordPublishAsync(
             "10000000000000002",
-            now.AddSeconds(2));
+            now.AddSeconds(3));
 
         Assert.True(first.Inserted);
         Assert.False(duplicate.Inserted);
@@ -172,6 +175,50 @@ public sealed class RelayStoreTests
         Assert.Equal(
             PublicationState.Ambiguous,
             await reopened.GetPublicationStateAsync(observation.ObservationId));
+    }
+
+    [Fact]
+    public async Task OnlyCurrentLeaderObservationIsAcceptedAcrossStandbyAndFailover()
+    {
+        await using var fixture = await StoreFixture.CreateAsync();
+        var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
+        var leader = await fixture.Store.HeartbeatAsync("relay-a", "instance-a", now);
+        var standby = await fixture.Store.HeartbeatAsync("relay-b", "instance-b", now.AddSeconds(1));
+
+        var accepted = await fixture.Store.EnqueueObservationAsync(
+            "relay-a", "instance-a", leader.Epoch,
+            new InboundObservation("leader:accepted", 1, "Leader", null, "accepted", now),
+            now.AddSeconds(2));
+        var rejectedStandby = await fixture.Store.EnqueueObservationAsync(
+            "relay-b", "instance-b", standby.Epoch,
+            new InboundObservation("standby:rejected", 1, "Standby", null, "rejected", now),
+            now.AddSeconds(2));
+        var rejectedInstance = await fixture.Store.EnqueueObservationAsync(
+            "relay-a", "superseded-instance", leader.Epoch,
+            new InboundObservation("instance:rejected", 1, "Leader", null, "rejected", now),
+            now.AddSeconds(2));
+
+        var replacement = await fixture.Store.HeartbeatAsync("relay-b", "instance-b", now.AddSeconds(11));
+        var rejectedExpiredLeader = await fixture.Store.EnqueueObservationAsync(
+            "relay-a", "instance-a", leader.Epoch,
+            new InboundObservation("expired:rejected", 1, "Old Leader", null, "rejected", now),
+            now.AddSeconds(12));
+        var acceptedReplacement = await fixture.Store.EnqueueObservationAsync(
+            "relay-b", "instance-b", replacement.Epoch,
+            new InboundObservation("replacement:accepted", 1, "New Leader", null, "accepted", now),
+            now.AddSeconds(12));
+
+        Assert.True(accepted.NodeActive);
+        Assert.True(accepted.LeaderAuthorized);
+        Assert.True(accepted.Inserted);
+        Assert.False(rejectedStandby.LeaderAuthorized);
+        Assert.False(rejectedInstance.LeaderAuthorized);
+        Assert.False(rejectedExpiredLeader.LeaderAuthorized);
+        Assert.True(acceptedReplacement.LeaderAuthorized);
+        Assert.True(acceptedReplacement.Inserted);
+        Assert.Null(await fixture.Store.GetPublicationStateAsync("standby:rejected"));
+        Assert.Null(await fixture.Store.GetPublicationStateAsync("instance:rejected"));
+        Assert.Null(await fixture.Store.GetPublicationStateAsync("expired:rejected"));
     }
 
     [Fact]
@@ -344,11 +391,13 @@ public sealed class RelayStoreTests
             queued.MessageId, claimed.Message!.ClaimId, DeliveryOutcome.Sent, now.AddSeconds(4));
         var observation = await fixture.Store.EnqueueObservationAsync(
             "relay-b",
+            "instance-b",
+            leader.Epoch,
             new InboundObservation("identity-conflict:observation", 1, "Backup Relay", null, "blocked", now),
             now.AddSeconds(4));
         Assert.False(laterClaim.NodeActive);
         Assert.Equal(NodeMutationResult.Unauthorized, completion);
-        Assert.False(observation.Authorized);
+        Assert.False(observation.NodeActive);
 
         var otherWorld = await fixture.Store.HeartbeatAsync(
             "relay-c", "instance-c", now.AddSeconds(4),
@@ -444,13 +493,15 @@ public sealed class RelayStoreTests
             queued.MessageId, claimed.Message!.ClaimId, DeliveryOutcome.Sent, now.AddSeconds(3));
         var observation = await fixture.Store.EnqueueObservationAsync(
             "relay-a",
+            "instance-a",
+            lease.Epoch,
             new InboundObservation("revoked:observation", 1, "Race Tester", null, "Blocked", now),
             now.AddSeconds(3));
 
         Assert.False(heartbeat.Authorized);
         Assert.False(claim.NodeActive);
         Assert.Equal(NodeMutationResult.Unauthorized, completion);
-        Assert.False(observation.Authorized);
+        Assert.False(observation.NodeActive);
         Assert.Equal(OutboundState.Claimed, await fixture.Store.GetOutboundStateAsync(queued.MessageId));
     }
 
@@ -524,10 +575,13 @@ public sealed class RelayStoreTests
     {
         await using var fixture = await StoreFixture.CreateAsync();
         var now = DateTimeOffset.Parse("2026-08-02T12:00:00Z");
+        var lease = await fixture.Store.HeartbeatAsync("relay-a", "instance-a", now);
         await fixture.Store.EnqueueObservationAsync(
             "relay-a",
+            "instance-a",
+            lease.Epoch,
             new InboundObservation("route:observation", 1, "Route Tester", null, "Bound route", now),
-            now);
+            now.AddMilliseconds(1));
 
         var first = await fixture.Store.ClaimDiscordPublishAsync("10000000000000002", now.AddSeconds(1));
         Assert.NotNull(first);
