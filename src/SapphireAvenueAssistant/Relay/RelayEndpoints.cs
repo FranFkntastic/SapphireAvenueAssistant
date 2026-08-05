@@ -27,7 +27,6 @@ public static class RelayEndpoints
                     : Results.Ok(new
                     {
                         result.NodeId,
-                        result.NodeLabel,
                         result.AccessToken
                     });
             });
@@ -56,13 +55,36 @@ public static class RelayEndpoints
                     return Results.BadRequest(new { error = "Invalid node or instance identity." });
                 }
 
+
+                RelayNodeIdentity? identity = null;
+                var hasAnyIdentity = body.CharacterName is not null || body.HomeWorldId is not null || body.HomeWorldName is not null;
+                if (hasAnyIdentity)
+                {
+                    var characterName = RelayText.Normalize(body.CharacterName, 64);
+                    var homeWorldName = RelayText.Normalize(body.HomeWorldName, 64);
+                    if (characterName is null || homeWorldName is null || body.HomeWorldId is null or <= 0)
+                    {
+                        return Results.BadRequest(new { error = "Character identity must include a character name and home world." });
+                    }
+
+                    identity = new RelayNodeIdentity(characterName, body.HomeWorldId.Value, homeWorldName);
+                }
+
                 var lease = await store.HeartbeatAsync(
                     nodeId,
                     body.InstanceId,
                     timeProvider.GetUtcNow(),
                     canSendToGame: body.CanSendToGame,
+                    identity: identity,
                     allowLegacyHeartbeatWithoutCapability: options.Relay.AllowLegacyHeartbeatWithoutCapability,
                     cancellationToken: cancellationToken);
+                if (lease.IdentityConflict is not null)
+                {
+                    return Results.Conflict(new
+                    {
+                        error = $"{lease.IdentityConflict} is already connected to another relay installation. This pairing was revoked; disconnect it and ask a Discord manager for a new pairing code."
+                    });
+                }
                 if (!lease.Authorized)
                 {
                     return Results.Unauthorized();
@@ -226,7 +248,12 @@ public static class RelayEndpoints
         value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or ':');
 }
 
-public sealed record HeartbeatRequest(string InstanceId, bool? CanSendToGame);
+public sealed record HeartbeatRequest(
+    string InstanceId,
+    bool? CanSendToGame,
+    string? CharacterName = null,
+    long? HomeWorldId = null,
+    string? HomeWorldName = null);
 
 public sealed record PairingRequest(string PairingCode);
 

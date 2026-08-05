@@ -107,8 +107,7 @@ public sealed class DiscordCommandRegistrationService(
                 {
                     Subcommand("status", "Show relay configuration and state"),
                     Subcommand("list-nodes", "List relay nodes and their status"),
-                    Subcommand("add-node", "Create a one-time node pairing code",
-                        new { name = "name", description = "Friendly node name", type = 3, required = true, max_length = 80 }),
+                    Subcommand("add-node", "Create a one-time node pairing code"),
                     Subcommand("configure", "Set the relay channel and allowed role",
                         new { name = "channel", description = "CWLS relay text channel", type = 7, required = true, channel_types = new[] { 0 } },
                         new { name = "role", description = "Role allowed to send CWLS messages", type = 8, required = true }),
@@ -119,10 +118,10 @@ public sealed class DiscordCommandRegistrationService(
                     Subcommand("pause", "Pause or resume CWLS message relay",
                         new { name = "paused", description = "True to pause; false to resume", type = 5, required = true }),
                     Subcommand("prefer-node", "Prefer a node at the next safe lease turnover",
-                        new { name = "node", description = "Relay node ID", type = 3, required = true, max_length = 64 }),
+                        new { name = "node", description = "Character and home world", type = 3, required = true, autocomplete = true }),
                     Subcommand("clear-preference", "Return node selection to automatic failover"),
                     Subcommand("revoke-node", "Permanently revoke a relay node",
-                        new { name = "node", description = "Relay node ID", type = 3, required = true, max_length = 64 })
+                        new { name = "node", description = "Character and home world", type = 3, required = true, autocomplete = true })
                 }
             })
     ];

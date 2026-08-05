@@ -119,7 +119,15 @@ public sealed class DiscordInteractionEndpointTests
                 GuildId = "10000000000000002",
                 ChannelId = "10000000000000003"
             },
-            Relay = new RelayOptions { DatabasePath = databasePath }
+            Relay = new RelayOptions
+            {
+                DatabasePath = databasePath,
+                NodeTokens = new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["relay-a"] = "token-a",
+                    ["relay-b"] = "token-b"
+                }
+            }
         };
         await using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder => builder.ConfigureServices(services =>
@@ -169,6 +177,90 @@ public sealed class DiscordInteractionEndpointTests
             .GetCommunityConfigurationAsync("10000000000000002");
         Assert.Equal(2, stored!.Revision);
         Assert.Equal("10000000000000007", stored.AllowedRoleId);
+
+        var store = factory.Services.GetRequiredService<RelayStore>();
+        var now = DateTimeOffset.Parse("2026-08-04T12:00:00Z");
+        await store.HeartbeatAsync(
+            "relay-a", "instance-a", now,
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Wei Ning", 40, "Sargatanas"));
+        await store.HeartbeatAsync(
+            "relay-b", "instance-b", now,
+            canSendToGame: false,
+            identity: new RelayNodeIdentity("Mega Phone", 40, "Sargatanas"));
+
+        string AutocompletePayload(string id, string permissions, string guild, string query) =>
+            JsonSerializer.Serialize(new
+            {
+                id,
+                application_id = "10000000000000001",
+                type = 4,
+                guild_id = guild,
+                channel_id = "10000000000000003",
+                member = new
+                {
+                    permissions,
+                    roles = Array.Empty<string>(),
+                    user = new { id = "10000000000000005", username = "manager" }
+                },
+                data = new
+                {
+                    name = "bridge",
+                    options = new[]
+                    {
+                        new
+                        {
+                            name = "prefer-node",
+                            type = 1,
+                            options = new[]
+                            {
+                                new { name = "node", type = 3, value = query, focused = true }
+                            }
+                        }
+                    }
+                }
+            });
+
+        using var autocomplete = await PostSignedAsync(
+            client,
+            AutocompletePayload("10000000000000211", "32", "10000000000000002", "Wei"),
+            timestamp,
+            expandedPrivateKey);
+        using var autocompleteBody = JsonDocument.Parse(await autocomplete.Content.ReadAsStringAsync());
+        var choices = autocompleteBody.RootElement.GetProperty("data").GetProperty("choices");
+        Assert.Equal(8, autocompleteBody.RootElement.GetProperty("type").GetInt32());
+        Assert.Equal(1, choices.GetArrayLength());
+        Assert.Equal("Wei Ning @ Sargatanas", choices[0].GetProperty("name").GetString());
+        Assert.Equal("relay-a", choices[0].GetProperty("value").GetString());
+
+        using var forbiddenAutocomplete = await PostSignedAsync(
+            client,
+            AutocompletePayload("10000000000000212", "0", "10000000000000002", string.Empty),
+            timestamp,
+            expandedPrivateKey);
+        using var forbiddenAutocompleteBody = JsonDocument.Parse(await forbiddenAutocomplete.Content.ReadAsStringAsync());
+        Assert.Equal(0, forbiddenAutocompleteBody.RootElement.GetProperty("data").GetProperty("choices").GetArrayLength());
+
+        using var wrongGuildAutocomplete = await PostSignedAsync(
+            client,
+            AutocompletePayload("10000000000000213", "32", "10000000000000999", string.Empty),
+            timestamp,
+            expandedPrivateKey);
+        using var wrongGuildAutocompleteBody = JsonDocument.Parse(await wrongGuildAutocomplete.Content.ReadAsStringAsync());
+        Assert.Equal(0, wrongGuildAutocompleteBody.RootElement.GetProperty("data").GetProperty("choices").GetArrayLength());
+
+        var prefer = BridgePayload(
+            "10000000000000214", "32", "10000000000000002", "10000000000000001",
+            new
+            {
+                name = "prefer-node",
+                type = 1,
+                options = new[] { new { name = "node", type = 3, value = "relay-a" } }
+            });
+        using var preferredResponse = await PostSignedAsync(client, prefer, timestamp, expandedPrivateKey);
+        var preferredBody = await preferredResponse.Content.ReadAsStringAsync();
+        Assert.Contains("Wei Ning @ Sargatanas", preferredBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("relay-a", preferredBody, StringComparison.Ordinal);
 
         var forbidden = BridgePayload(
             "10000000000000202", "0", "10000000000000002", "10000000000000001",

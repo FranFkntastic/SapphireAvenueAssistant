@@ -3,14 +3,19 @@ using System.Text.Json.Serialization;
 
 namespace SapphireAvenueRelay;
 
-internal sealed record HeartbeatRequest(string InstanceId, bool CanSendToGame);
+internal sealed record HeartbeatRequest(
+    string InstanceId,
+    bool CanSendToGame,
+    string? CharacterName,
+    uint? HomeWorldId,
+    string? HomeWorldName);
 internal sealed record HeartbeatResponse(
     string Role,
     long Epoch,
     DateTimeOffset ExpiresAtUtc,
     bool IsPreferred = false);
 internal sealed record PairNodeRequest(string PairingCode);
-internal sealed record PairNodeResponse(string NodeId, string NodeLabel, string AccessToken);
+internal sealed record PairNodeResponse(string NodeId, string AccessToken);
 internal sealed record ClaimRequest(string InstanceId, long Epoch);
 internal sealed record OutboundRelayMessage(
     string MessageId,
@@ -50,6 +55,7 @@ internal sealed record RelaySnapshot(
     string Schema,
     bool IsLoggedIn,
     string? Character,
+    string? HomeWorld,
     IReadOnlyList<CwlsSlotSnapshot> CwlsSlots,
     int ConfiguredSlot,
     string ExpectedCwlsName,

@@ -40,7 +40,6 @@ internal sealed class RelayCoordinatorClient : IDisposable
             cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidDataException("The coordinator returned an empty pairing result.");
         if (!RelayConfigurationPolicy.IsNodeIdValid(pairing.NodeId) ||
-            !RelayConfigurationPolicy.IsNodeLabelValid(pairing.NodeLabel) ||
             !RelayConfigurationPolicy.IsAccessTokenValid(pairing.AccessToken))
         {
             throw new InvalidDataException("The coordinator returned an invalid node identity or credential.");
@@ -52,15 +51,23 @@ internal sealed class RelayCoordinatorClient : IDisposable
     public async Task<HeartbeatResponse> HeartbeatAsync(
         string instanceId,
         bool canSendToGame,
+        RelayGameIdentity identity,
         CancellationToken cancellationToken)
     {
         using var response = await SendAsync(
             HttpMethod.Post,
             "heartbeat",
             JsonContent.Create(
-                new HeartbeatRequest(instanceId, canSendToGame),
+                new HeartbeatRequest(
+                    instanceId,
+                    canSendToGame,
+                    identity.CharacterName,
+                    identity.HomeWorldId,
+                    identity.HomeWorldName),
                 RelayJsonContext.Default.HeartbeatRequest),
             cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.Conflict)
+            throw new NodeIdentityConflictException(await ReadFailureAsync(response, cancellationToken).ConfigureAwait(false));
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync(RelayJsonContext.Default.HeartbeatResponse, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidDataException("The coordinator returned an empty heartbeat.");
@@ -198,6 +205,28 @@ internal sealed class RelayCoordinatorClient : IDisposable
         };
     }
 
+    private static async Task<string> ReadFailureAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(body);
+            if (document.RootElement.TryGetProperty("error", out var error) &&
+                error.ValueKind == System.Text.Json.JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(error.GetString()))
+            {
+                return error.GetString()!;
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return "This character and home world are already connected to another relay installation.";
+    }
+
     private string UnprotectNodeToken()
     {
         if (string.IsNullOrWhiteSpace(configuration.RelayProtectedAccessToken))
@@ -213,4 +242,13 @@ internal sealed class RelayCoordinatorClient : IDisposable
             throw new InvalidOperationException("Relay node token cannot be decrypted for this Windows user.", exception);
         }
     }
+}
+
+internal sealed class NodeIdentityConflictException(string message) : InvalidOperationException(message);
+
+internal sealed record RelayGameIdentity(string? CharacterName, uint? HomeWorldId, string? HomeWorldName)
+{
+    public string? DisplayName => CharacterName is null || HomeWorldName is null
+        ? null
+        : $"{CharacterName} @ {HomeWorldName}";
 }
