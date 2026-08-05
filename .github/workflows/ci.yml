@@ -28,10 +28,12 @@ jobs:
         shell: pwsh
         run: |
           $archive = Join-Path $env:RUNNER_TEMP 'dalamud-latest.zip'
-          $dalamudRoot = Join-Path $env:RUNNER_TEMP 'dalamud'
+          $dalamudRoot = Join-Path $env:APPDATA 'XIVLauncher\addon\Hooks\dev'
           Invoke-WebRequest 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
           Expand-Archive $archive -DestinationPath $dalamudRoot
-          "DALAMUD_HOME=$dalamudRoot" | Out-File $env:GITHUB_ENV -Append
+          if (-not (Test-Path (Join-Path $dalamudRoot 'Dalamud.dll'))) {
+            throw 'Dalamud reference bundle is incomplete.'
+          }
 
       - name: Test coordinator boundaries
         working-directory: SapphireAvenueAssistant
