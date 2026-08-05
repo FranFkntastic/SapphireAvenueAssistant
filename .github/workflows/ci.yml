@@ -24,6 +24,15 @@ jobs:
         with:
           dotnet-version: 10.0.301
 
+      - name: Install Dalamud reference assemblies
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'dalamud-latest.zip'
+          $home = Join-Path $env:RUNNER_TEMP 'dalamud'
+          Invoke-WebRequest 'https://goatcorp.github.io/dalamud-distrib/latest.zip' -OutFile $archive
+          Expand-Archive $archive -DestinationPath $home
+          "DALAMUD_HOME=$home" | Out-File $env:GITHUB_ENV -Append
+
       - name: Test coordinator boundaries
         working-directory: SapphireAvenueAssistant
         run: dotnet test tests/SapphireAvenueAssistant.Tests/SapphireAvenueAssistant.Tests.csproj -c Release
