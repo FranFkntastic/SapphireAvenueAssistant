@@ -1,9 +1,11 @@
 <Project>
+  <Import Project="eng/Franthropy.Version.props" />
   <PropertyGroup>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <FranthropyRoot Condition="'$(FranthropyRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\Franthropy'))</FranthropyRoot>
-    <FranthropyDalamudProject Condition="'$(FranthropyDalamudProject)' == ''">$(FranthropyRoot)\src\Franthropy.Dalamud\Franthropy.Dalamud.csproj</FranthropyDalamudProject>
+    <FranthropySource Condition="'$(FranthropySource)' == ''">Package</FranthropySource>
+    <FranthropyFeed Condition="'$(FranthropyFeed)' == ''">$(LOCALAPPDATA)/Franthropy/packages</FranthropyFeed>
+    <RestoreAdditionalProjectSources>$(RestoreAdditionalProjectSources);$(FranthropyFeed)</RestoreAdditionalProjectSources>
   </PropertyGroup>
 </Project>
