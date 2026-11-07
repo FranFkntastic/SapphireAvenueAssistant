@@ -4,7 +4,7 @@
   "Punchline": "Bridge one CWLS with your community Discord.",
   "Description": "By FranFkntastic. Connect one FFXIV cross-world linkshell to a community-owned Discord bot with exact CWLS identity checks.",
   "InternalName": "SapphireAvenueRelay",
-  "AssemblyVersion": "0.2.0.0",
+  "AssemblyVersion": "0.2.1.0",
   "DalamudApiLevel": 15,
   "ApplicableVersion": "any",
   "Tags": ["discord", "linkshell", "relay"],
