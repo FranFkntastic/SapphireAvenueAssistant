@@ -23,7 +23,6 @@
     </Content>
     <PackageReference Include="Franthropy.Dalamud" Version="[$(FranthropyPackageVersion)]" Condition="'$(FranthropySource)' == 'Package'" />
     <ProjectReference Include="$(FranthropyRoot)/src/Franthropy.Dalamud/Franthropy.Dalamud.csproj" Condition="'$(FranthropySource)' == 'Local'" />
-    <InternalsVisibleTo Include="SapphireAvenueRelay.Tests" />
   </ItemGroup>
 
   <Target Name="GenerateBuildIdentity" BeforeTargets="CoreCompile">
