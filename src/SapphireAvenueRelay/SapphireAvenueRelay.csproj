@@ -29,7 +29,7 @@
     <Exec Command="git rev-parse --short HEAD" ConsoleToMsBuild="true" StandardOutputImportance="Low">
       <Output TaskParameter="ConsoleOutput" ItemName="_GitCommitOutput" />
     </Exec>
-    <Exec Command="git status --porcelain" ConsoleToMsBuild="true" StandardOutputImportance="Low">
+    <Exec Command="git status --porcelain -- &quot;:/&quot; &quot;:(top,exclude,glob)**/packages.lock.json&quot;" ConsoleToMsBuild="true" StandardOutputImportance="Low">
       <Output TaskParameter="ConsoleOutput" ItemName="_GitStatusOutput" />
     </Exec>
     <PropertyGroup>
