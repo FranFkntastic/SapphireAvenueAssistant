@@ -243,12 +243,21 @@ internal sealed class RelayCoordinatorClient : IDisposable
         }
         catch (Exception exception) when (exception is FormatException or CryptographicException)
         {
-            throw new InvalidOperationException("Relay node token cannot be decrypted for this Windows user.", exception);
+            throw new RelayCredentialUnreadableException(exception);
         }
     }
 }
 
 internal sealed class NodeIdentityConflictException(string message) : InvalidOperationException(message);
+
+/// <summary>
+/// The saved relay credential exists but Windows refuses to decrypt it (a different
+/// Windows account, a copied profile, or a reset Windows password). Retrying cannot
+/// succeed; only a new pairing replaces the credential.
+/// </summary>
+internal sealed class RelayCredentialUnreadableException(Exception innerException) : InvalidOperationException(
+    "This installation's saved relay pairing can't be read on this Windows account. Disconnect and pair again with a new code.",
+    innerException);
 
 internal sealed record RelayGameIdentity(string? CharacterName, uint? HomeWorldId, string? HomeWorldName)
 {

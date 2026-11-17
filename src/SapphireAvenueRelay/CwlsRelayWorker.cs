@@ -41,6 +41,9 @@ internal sealed class CwlsRelayWorker : IDisposable
     private DateTimeOffset? leaseExpiresAtUtc;
     private string? lastError;
     private bool identityConflictDetected;
+    // The protected credential Windows refused to decrypt. Any new pairing stores a
+    // different value, which re-arms the worker without extra bookkeeping.
+    private string? unreadableProtectedToken;
 
     public CwlsRelayWorker(
         IDalamudPluginInterface pluginInterface,
@@ -295,6 +298,11 @@ internal sealed class CwlsRelayWorker : IDisposable
                     // The coordinator revoked this credential. A new pairing is required;
                     // retrying would only hammer a permanently fenced identity.
                 }
+                else if (HasUnreadableCredential())
+                {
+                    // Windows cannot decrypt the saved credential. Like a revoked pairing,
+                    // only a new pairing can fix it, so stay idle instead of failing every cycle.
+                }
                 else
                 {
                     var cycle = await framework.RunOnTick(
@@ -344,6 +352,19 @@ internal sealed class CwlsRelayWorker : IDisposable
                     lastError = exception.Message;
                 }
                 log.Error(exception, "Relay pairing was revoked because its character and home world are already claimed.");
+            }
+            catch (RelayCredentialUnreadableException exception)
+            {
+                lock (gate)
+                {
+                    unreadableProtectedToken = configuration.RelayProtectedAccessToken;
+                    coordinatorReachable = false;
+                    role = "pairing-unreadable";
+                    isPreferred = false;
+                    leaseExpiresAtUtc = null;
+                    lastError = exception.Message;
+                }
+                log.Error(exception, "Relay paused: the saved pairing cannot be decrypted for this Windows account (node {NodeId}). It will stay paused until this installation is paired again.", configuration.NodeId);
             }
             catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or InvalidDataException)
             {
@@ -623,6 +644,13 @@ internal sealed class CwlsRelayWorker : IDisposable
     {
         lock (gate)
             return identityConflictDetected;
+    }
+
+    private bool HasUnreadableCredential()
+    {
+        lock (gate)
+            return unreadableProtectedToken is not null &&
+                string.Equals(unreadableProtectedToken, configuration.RelayProtectedAccessToken, StringComparison.Ordinal);
     }
 
     private static RelayGameIdentity ReadGameIdentity(Dalamud.Game.ClientState.Objects.SubKinds.IPlayerCharacter? player)
