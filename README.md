@@ -4,9 +4,7 @@ Sapphire Avenue Discord Bridge is a fail-closed bridge between a community-owned
 
 The plugin starts with both directions disabled. A Discord server manager creates a short-lived connection string with `/bridge add-node`; the player pastes that single value into `/sadbridge`, then selects a CWLS by name from the character's current memberships. Every observation and send rechecks the saved slot/name pair, so a reordered or missing CWLS pauses the relay instead of writing into another chat.
 
-Game-bound messages use one epoch-fenced coordinator leader. A send is reported as successful only after the plugin observes the matching CWLS echo from the local character; missing echoes and uncertain failures are sealed as ambiguous rather than retried.
-
-The plugin exposes an authenticated local Agent Bridge manifest and allowlisted semantic commands. `tools/Invoke-RelayBridge.ps1` can read its manifest/snapshot, configure or clear it, enable directions, and perform an explicit verified test send without desktop automation. Node and bridge tokens are protected at rest with Windows DPAPI and are never returned in snapshots.
+Game-bound messages use one epoch-fenced coordinator leader. A send is reported as successful only after the plugin observes the matching CWLS echo from the local character; missing echoes and uncertain failures are sealed as ambiguous rather than retried. Node tokens are protected at rest with Windows DPAPI.
 
 The first release boundary is deliberately one coordinator deployment per community-owned Discord application and guild. Shared multi-community hosting is not implied: the relay message, observation, and lease tables are not tenant-partitioned yet.
 
