@@ -47,7 +47,10 @@ public sealed class DiscordReactionWorker(
                 if (options.Discord.CanPublish)
                 {
                     await ProcessInlineAsync(stoppingToken);
-                    await ProcessDurableAsync(stoppingToken);
+                    if (await ProcessDurableAsync(stoppingToken))
+                    {
+                        await ClearStaleSuccessReactionsAsync(stoppingToken);
+                    }
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -89,7 +92,8 @@ public sealed class DiscordReactionWorker(
         }
     }
 
-    private async Task ProcessDurableAsync(CancellationToken cancellationToken)
+    // Returns false when Discord rate-limited this cycle, so clearing waits for the next one.
+    private async Task<bool> ProcessDurableAsync(CancellationToken cancellationToken)
     {
         var pending = await store.ListPendingChannelReactionsAsync(timeProvider.GetUtcNow(), 10, cancellationToken);
         foreach (var reaction in pending)
@@ -111,7 +115,7 @@ public sealed class DiscordReactionWorker(
                     if (result.RetryAfter is not null)
                     {
                         // Rate-limited: leave the rest of this batch for the next cycle.
-                        return;
+                        return false;
                     }
 
                     break;
@@ -120,6 +124,50 @@ public sealed class DiscordReactionWorker(
                         reaction.OutboundMessageId, ReactionCompletion.Abandoned, now, cancellationToken: cancellationToken);
                     logger.LogWarning(
                         "Gave up reacting {Emoji} to Discord message {MessageId} (outbound {OutboundId}): {Error}",
+                        reaction.Emoji,
+                        reaction.SourceMessageId,
+                        reaction.OutboundMessageId,
+                        result.Error);
+                    break;
+            }
+        }
+
+        return true;
+    }
+
+    // Only the latest delivered channel message keeps its check mark. Once a newer one carries
+    // its own, older check marks are removed (the bot's own reaction only); every other
+    // reaction stays. State lives in the store, so a restart resumes where it left off.
+    private async Task ClearStaleSuccessReactionsAsync(CancellationToken cancellationToken)
+    {
+        var stale = await store.ListStaleSuccessReactionsAsync(timeProvider.GetUtcNow(), 10, cancellationToken);
+        foreach (var reaction in stale)
+        {
+            var result = await discord.RemoveOwnReactionAsync(
+                reaction.ChannelId, reaction.SourceMessageId, reaction.Emoji, cancellationToken);
+            var now = timeProvider.GetUtcNow();
+            switch (result.Outcome)
+            {
+                case DiscordReactionOutcome.Removed:
+                    await store.CompleteSuccessReactionClearAsync(
+                        reaction.OutboundMessageId, ReactionClearCompletion.Cleared, now, cancellationToken: cancellationToken);
+                    break;
+                case DiscordReactionOutcome.RetryableRejection when reaction.AttemptCount + 1 < MaximumDurableAttempts:
+                    var backoff = result.RetryAfter ??
+                        TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, reaction.AttemptCount + 1)));
+                    await store.CompleteSuccessReactionClearAsync(
+                        reaction.OutboundMessageId, ReactionClearCompletion.Retry, now, backoff, cancellationToken);
+                    if (result.RetryAfter is not null)
+                    {
+                        return;
+                    }
+
+                    break;
+                default:
+                    await store.CompleteSuccessReactionClearAsync(
+                        reaction.OutboundMessageId, ReactionClearCompletion.Abandoned, now, cancellationToken: cancellationToken);
+                    logger.LogWarning(
+                        "Gave up removing {Emoji} from Discord message {MessageId} (outbound {OutboundId}): {Error}",
                         reaction.Emoji,
                         reaction.SourceMessageId,
                         reaction.OutboundMessageId,

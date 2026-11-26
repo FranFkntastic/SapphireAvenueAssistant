@@ -43,7 +43,7 @@ The bot reacts to each relay-channel message with what happened:
 
 | Reaction | Meaning |
 |---|---|
-| ✅ | Sent. The relay saw the line appear in the CWLS. |
+| ✅ | Sent. The relay saw the line appear in the CWLS. Only the latest delivered message keeps its ✅; the bot removes it from older ones. Other reactions stay. |
 | ⚠️ | Uncertain. The game may or may not have shown it, so the line is not retried. |
 | ❌ | Not sent. The relay could not send it. |
 | ⌛ | Expired. No relay picked it up within `Relay:ChannelMessageMaxQueueSeconds` (default 120 seconds), so it will not arrive late. |

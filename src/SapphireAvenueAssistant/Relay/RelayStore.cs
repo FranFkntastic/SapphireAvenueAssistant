@@ -176,6 +176,8 @@ public sealed class RelayStore
                 connection, "outbound_messages", "reaction_attempts", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
             await EnsureColumnAsync(
                 connection, "outbound_messages", "reaction_retry_at_ms", "INTEGER NULL", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "outbound_messages", "reaction_clear_attempts", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
             await using (var reactionIndex = connection.CreateCommand())
             {
                 reactionIndex.CommandText = """
@@ -1334,6 +1336,118 @@ public sealed class RelayStore
                     : DBNull.Value);
             update.Parameters.AddWithValue("$messageId", outboundMessageId);
             update.Parameters.AddWithValue("$channel", OutboundOrigin.Channel);
+            await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    // reaction_state values: 0 pending, 1 reacted, 2 abandoned, 3 success reaction cleared
+    // (a newer channel message now carries the check mark), 4 gave up clearing it.
+    // Only check marks are ever cleared; failure and uncertainty reactions stay put.
+    private const int ReactionReacted = 1;
+    private const int ReactionSuccessCleared = 3;
+    private const int ReactionClearAbandoned = 4;
+
+    // Sent rows whose check mark is still on Discord while a newer sent row (by completed_at_ms,
+    // then message_id) in the same channel already carries its own. Anchoring on rows that have
+    // actually reacted keeps at least one check mark visible while the newest is still pending,
+    // and a late reaction on an older message is cleared rather than winning.
+    public async Task<IReadOnlyList<PendingChannelReaction>> ListStaleSuccessReactionsAsync(
+        DateTimeOffset now,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var select = connection.CreateCommand();
+            select.CommandText = """
+                SELECT o.message_id, o.source_channel_id, o.source_message_id, o.reaction_clear_attempts
+                FROM outbound_messages o
+                WHERE o.origin = $channel
+                  AND o.state = $sent
+                  AND o.reaction_state = $reacted
+                  AND o.source_channel_id IS NOT NULL
+                  AND o.source_message_id IS NOT NULL
+                  AND (o.reaction_retry_at_ms IS NULL OR o.reaction_retry_at_ms <= $now)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM outbound_messages n
+                      WHERE n.origin = $channel
+                        AND n.state = $sent
+                        AND n.reaction_state = $reacted
+                        AND n.source_channel_id = o.source_channel_id
+                        AND n.source_message_id IS NOT NULL
+                        AND (COALESCE(n.completed_at_ms, 0) > COALESCE(o.completed_at_ms, 0)
+                             OR (COALESCE(n.completed_at_ms, 0) = COALESCE(o.completed_at_ms, 0)
+                                 AND n.message_id > o.message_id)))
+                ORDER BY o.completed_at_ms, o.message_id
+                LIMIT $limit;
+                """;
+            select.Parameters.AddWithValue("$channel", OutboundOrigin.Channel);
+            select.Parameters.AddWithValue("$sent", (int)OutboundState.Sent);
+            select.Parameters.AddWithValue("$reacted", ReactionReacted);
+            select.Parameters.AddWithValue("$now", now.ToUnixTimeMilliseconds());
+            select.Parameters.AddWithValue("$limit", limit);
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            var results = new List<PendingChannelReaction>();
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                results.Add(new PendingChannelReaction(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    ChannelReactions.Sent,
+                    reader.GetInt32(3)));
+            }
+
+            return results;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public async Task CompleteSuccessReactionClearAsync(
+        string outboundMessageId,
+        ReactionClearCompletion completion,
+        DateTimeOffset now,
+        TimeSpan? retryAfter = null,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var update = connection.CreateCommand();
+            update.CommandText = """
+                UPDATE outbound_messages
+                SET reaction_state = $reactionState,
+                    reaction_clear_attempts = reaction_clear_attempts + 1,
+                    reaction_retry_at_ms = $retryAt
+                WHERE message_id = $messageId
+                  AND origin = $channel
+                  AND reaction_state = $reacted;
+                """;
+            update.Parameters.AddWithValue("$reactionState", completion switch
+            {
+                ReactionClearCompletion.Cleared => ReactionSuccessCleared,
+                ReactionClearCompletion.Abandoned => ReactionClearAbandoned,
+                _ => ReactionReacted
+            });
+            update.Parameters.AddWithValue(
+                "$retryAt",
+                completion == ReactionClearCompletion.Retry
+                    ? (now + (retryAfter ?? TimeSpan.FromSeconds(2))).ToUnixTimeMilliseconds()
+                    : DBNull.Value);
+            update.Parameters.AddWithValue("$messageId", outboundMessageId);
+            update.Parameters.AddWithValue("$channel", OutboundOrigin.Channel);
+            update.Parameters.AddWithValue("$reacted", ReactionReacted);
             await update.ExecuteNonQueryAsync(cancellationToken);
         }
         finally
