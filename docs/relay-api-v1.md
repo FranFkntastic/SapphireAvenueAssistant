@@ -51,11 +51,14 @@ The response contains `role`, `isPreferred`, `epoch`, and `expiresAtUtc`. Charac
   "instanceId": "random-per-client-start",
   "epoch": 42,
   "claimId": "claim-from-the-response",
-  "outcome": "sent"
+  "outcome": "sent",
+  "echoSlot": 1
 }
 ```
 
-Valid outcomes are `sent`, `notSent`, and `ambiguous`. Use `notSent` only when the game send was definitely never attempted; it is the sole outcome that requeues a line. A timeout, disconnect, or uncertain game result is `ambiguous` and will not be retried automatically.
+Valid outcomes are `sent`, `notSent`, and `ambiguous`. Use `notSent` only when the game send was definitely never attempted. For a `/cwls message` line it requeues the line; a line ingested from an ordinary channel message is instead closed as not sent, because chat should not arrive late. A timeout, disconnect, or uncertain game result is `ambiguous` and will not be retried automatically.
+
+`echoSlot` is optional. A node sets it only for `sent`, when it observed its own matching echo on the configured CWLS and withheld that echo from `POST /observations` because it would otherwise have reported it. The coordinator then publishes the confirmation line for `/cwls message` sends itself, and channel-message sends are confirmed with a reaction only. Nodes that omit `echoSlot` keep reporting their echo as an ordinary observation, so nothing is published twice for slash-command sends.
 
 ## Game to Discord
 

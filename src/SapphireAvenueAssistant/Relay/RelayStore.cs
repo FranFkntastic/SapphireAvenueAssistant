@@ -162,6 +162,29 @@ public sealed class RelayStore
                 connection, "relay_nodes", "home_world_id", "INTEGER NULL", cancellationToken);
             await EnsureColumnAsync(
                 connection, "relay_nodes", "home_world_name", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "outbound_messages", "origin", "TEXT NOT NULL DEFAULT 'interaction'", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "outbound_messages", "source_channel_id", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "outbound_messages", "source_message_id", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "outbound_messages", "completion_reason", "TEXT NULL", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "outbound_messages", "reaction_state", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "outbound_messages", "reaction_attempts", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+            await EnsureColumnAsync(
+                connection, "outbound_messages", "reaction_retry_at_ms", "INTEGER NULL", cancellationToken);
+            await using (var reactionIndex = connection.CreateCommand())
+            {
+                reactionIndex.CommandText = """
+                    CREATE INDEX IF NOT EXISTS ix_outbound_channel_reactions
+                    ON outbound_messages(origin, reaction_state, state);
+                    """;
+                await reactionIndex.ExecuteNonQueryAsync(cancellationToken);
+            }
+
             await EnsureNodeIdentityIndexAsync(connection, cancellationToken);
             await SeedConfigurationAsync(connection, cancellationToken);
             await SeedRelayNodesAsync(connection, cancellationToken);
@@ -555,7 +578,7 @@ public sealed class RelayStore
         }
     }
 
-    public async Task<CwlsEnqueueResult> EnqueueAuthorizedOutboundAsync(
+    public Task<CwlsEnqueueResult> EnqueueAuthorizedOutboundAsync(
         string guildId,
         string channelId,
         IReadOnlyCollection<string> memberRoleIds,
@@ -564,7 +587,37 @@ public sealed class RelayStore
         string discordDisplayName,
         string content,
         DateTimeOffset now,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        EnqueueAuthorizedOutboundCoreAsync(
+            guildId, channelId, memberRoleIds, interactionId, discordUserId,
+            discordDisplayName, content, now, channelSource: null, cancellationToken);
+
+    // Ordinary channel messages pass the exact same authorization as /cwls message. The
+    // idempotency key is "msg:<message id>" because the gateway can redeliver on resume.
+    public Task<CwlsEnqueueResult> EnqueueAuthorizedChannelOutboundAsync(
+        string guildId,
+        ChannelOutboundSource source,
+        IReadOnlyCollection<string> memberRoleIds,
+        string discordUserId,
+        string discordDisplayName,
+        string content,
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default) =>
+        EnqueueAuthorizedOutboundCoreAsync(
+            guildId, source.ChannelId, memberRoleIds, $"msg:{source.MessageId}", discordUserId,
+            discordDisplayName, content, now, source, cancellationToken);
+
+    private async Task<CwlsEnqueueResult> EnqueueAuthorizedOutboundCoreAsync(
+        string guildId,
+        string channelId,
+        IReadOnlyCollection<string> memberRoleIds,
+        string interactionId,
+        string discordUserId,
+        string discordDisplayName,
+        string content,
+        DateTimeOffset now,
+        ChannelOutboundSource? channelSource,
+        CancellationToken cancellationToken)
     {
         await gate.WaitAsync(cancellationToken);
         try
@@ -604,10 +657,17 @@ public sealed class RelayStore
             insert.CommandText = """
                 INSERT OR IGNORE INTO outbound_messages(
                     message_id, discord_interaction_id, discord_user_id,
-                    discord_display_name, content, created_at_ms, state)
+                    discord_display_name, content, created_at_ms, state,
+                    origin, source_channel_id, source_message_id)
                 VALUES ($messageId, $interactionId, $userId,
-                        $displayName, $content, $createdAt, $state);
+                        $displayName, $content, $createdAt, $state,
+                        $origin, $sourceChannelId, $sourceMessageId);
                 """;
+            insert.Parameters.AddWithValue(
+                "$origin",
+                channelSource is null ? OutboundOrigin.Interaction : OutboundOrigin.Channel);
+            insert.Parameters.AddWithValue("$sourceChannelId", (object?)channelSource?.ChannelId ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$sourceMessageId", (object?)channelSource?.MessageId ?? DBNull.Value);
             insert.Parameters.AddWithValue("$messageId", messageId);
             insert.Parameters.AddWithValue("$interactionId", interactionId);
             insert.Parameters.AddWithValue("$userId", discordUserId);
@@ -655,6 +715,7 @@ public sealed class RelayStore
 
             var nowMs = now.ToUnixTimeMilliseconds();
             await SealExpiredOutboundClaimsAsync(connection, transaction, nowMs, cancellationToken);
+            await ExpireStaleChannelOutboundAsync(connection, transaction, nowMs, cancellationToken);
             var leader = await ReadLeaderAsync(connection, transaction, cancellationToken);
             if (leader.Epoch != epoch || leader.ExpiresAtMs <= nowMs ||
                 !string.Equals(leader.NodeId, nodeId, StringComparison.Ordinal) ||
@@ -740,6 +801,7 @@ public sealed class RelayStore
         string claimId,
         DeliveryOutcome outcome,
         DateTimeOffset now,
+        int? echoSlot = null,
         CancellationToken cancellationToken = default)
     {
         await gate.WaitAsync(cancellationToken);
@@ -753,9 +815,34 @@ public sealed class RelayStore
                 return NodeMutationResult.Unauthorized;
             }
 
+            string? origin = null;
+            string? displayName = null;
+            string? content = null;
+            await using (var read = connection.CreateCommand())
+            {
+                read.Transaction = transaction;
+                read.CommandText = """
+                    SELECT origin, discord_display_name, content
+                    FROM outbound_messages
+                    WHERE message_id = $messageId;
+                    """;
+                read.Parameters.AddWithValue("$messageId", messageId);
+                await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    origin = reader.GetString(0);
+                    displayName = reader.GetString(1);
+                    content = reader.GetString(2);
+                }
+            }
+
+            var isChannelOrigin = string.Equals(origin, OutboundOrigin.Channel, StringComparison.Ordinal);
             var nextState = outcome switch
             {
                 DeliveryOutcome.Sent => OutboundState.Sent,
+                // A channel line is chat, not a command: a definite not-sent is terminal (a cross
+                // reaction) rather than silently retried. Interaction-origin lines keep their requeue.
+                DeliveryOutcome.NotSent when isChannelOrigin => OutboundState.NotSent,
                 DeliveryOutcome.NotSent => OutboundState.Pending,
                 DeliveryOutcome.Ambiguous => OutboundState.Ambiguous,
                 _ => throw new ArgumentOutOfRangeException(nameof(outcome))
@@ -770,7 +857,8 @@ public sealed class RelayStore
                     claim_node_id = CASE WHEN $nextState = $pending THEN NULL ELSE claim_node_id END,
                     claim_instance_id = CASE WHEN $nextState = $pending THEN NULL ELSE claim_instance_id END,
                     claim_epoch = CASE WHEN $nextState = $pending THEN NULL ELSE claim_epoch END,
-                    claim_expires_at_ms = CASE WHEN $nextState = $pending THEN NULL ELSE claim_expires_at_ms END
+                    claim_expires_at_ms = CASE WHEN $nextState = $pending THEN NULL ELSE claim_expires_at_ms END,
+                    completion_reason = CASE WHEN $nextState = $notSent THEN 'not-sent' ELSE completion_reason END
                 WHERE message_id = $messageId
                   AND state = $claimed
                   AND claim_id = $claimId
@@ -787,7 +875,26 @@ public sealed class RelayStore
             update.Parameters.AddWithValue("$nodeId", nodeId);
             update.Parameters.AddWithValue("$instanceId", instanceId);
             update.Parameters.AddWithValue("$epoch", epoch);
+            update.Parameters.AddWithValue("$notSent", (int)OutboundState.NotSent);
             var completed = await update.ExecuteNonQueryAsync(cancellationToken) == 1;
+
+            // A relay that reports echoSlot suppressed its own echo observation. For /cwls message
+            // sends the coordinator therefore publishes the confirmation line itself, through the
+            // ordinary observation queue (deterministic ID -> deterministic Discord nonce). Channel
+            // lines are confirmed only by their reaction; legacy relays that omit echoSlot still
+            // report their echo as an observation, so nothing is enqueued for them here.
+            if (completed &&
+                nextState == OutboundState.Sent &&
+                !isChannelOrigin &&
+                echoSlot is >= 1 and <= 8 &&
+                displayName is not null &&
+                content is not null)
+            {
+                await EnqueueSendConfirmationAsync(
+                    connection, transaction, nodeId, messageId, echoSlot.Value,
+                    displayName, content, now, cancellationToken);
+            }
+
             transaction.Commit();
             return completed ? NodeMutationResult.Completed : NodeMutationResult.Conflict;
         }
@@ -1121,6 +1228,119 @@ public sealed class RelayStore
             "SELECT publication_state FROM inbound_observations WHERE observation_id = $id;",
             observationId,
             cancellationToken);
+
+    public async Task<int> ExpireStaleChannelOutboundAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            using var transaction = connection.BeginTransaction();
+            var expired = await ExpireStaleChannelOutboundAsync(
+                connection, transaction, now.ToUnixTimeMilliseconds(), cancellationToken);
+            transaction.Commit();
+            return expired;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<PendingChannelReaction>> ListPendingChannelReactionsAsync(
+        DateTimeOffset now,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var select = connection.CreateCommand();
+            select.CommandText = """
+                SELECT message_id, source_channel_id, source_message_id, state,
+                       completion_reason, reaction_attempts
+                FROM outbound_messages
+                WHERE origin = $channel
+                  AND reaction_state = 0
+                  AND state IN ($sent, $ambiguous, $notSent)
+                  AND source_channel_id IS NOT NULL
+                  AND source_message_id IS NOT NULL
+                  AND (reaction_retry_at_ms IS NULL OR reaction_retry_at_ms <= $now)
+                ORDER BY completed_at_ms, message_id
+                LIMIT $limit;
+                """;
+            select.Parameters.AddWithValue("$channel", OutboundOrigin.Channel);
+            select.Parameters.AddWithValue("$sent", (int)OutboundState.Sent);
+            select.Parameters.AddWithValue("$ambiguous", (int)OutboundState.Ambiguous);
+            select.Parameters.AddWithValue("$notSent", (int)OutboundState.NotSent);
+            select.Parameters.AddWithValue("$now", now.ToUnixTimeMilliseconds());
+            select.Parameters.AddWithValue("$limit", limit);
+            await using var reader = await select.ExecuteReaderAsync(cancellationToken);
+            var results = new List<PendingChannelReaction>();
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var state = (OutboundState)reader.GetInt32(3);
+                var reason = reader.IsDBNull(4) ? null : reader.GetString(4);
+                results.Add(new PendingChannelReaction(
+                    reader.GetString(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    ChannelReactions.ForTerminalState(state, reason),
+                    reader.GetInt32(5)));
+            }
+
+            return results;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    public async Task CompleteChannelReactionAsync(
+        string outboundMessageId,
+        ReactionCompletion completion,
+        DateTimeOffset now,
+        TimeSpan? retryAfter = null,
+        CancellationToken cancellationToken = default)
+    {
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            await using var connection = await OpenAsync(cancellationToken);
+            await using var update = connection.CreateCommand();
+            update.CommandText = """
+                UPDATE outbound_messages
+                SET reaction_state = $reactionState,
+                    reaction_attempts = reaction_attempts + 1,
+                    reaction_retry_at_ms = $retryAt
+                WHERE message_id = $messageId
+                  AND origin = $channel
+                  AND reaction_state = 0;
+                """;
+            update.Parameters.AddWithValue("$reactionState", completion switch
+            {
+                ReactionCompletion.Reacted => 1,
+                ReactionCompletion.Abandoned => 2,
+                _ => 0
+            });
+            update.Parameters.AddWithValue(
+                "$retryAt",
+                completion == ReactionCompletion.Retry
+                    ? (now + (retryAfter ?? TimeSpan.FromSeconds(2))).ToUnixTimeMilliseconds()
+                    : DBNull.Value);
+            update.Parameters.AddWithValue("$messageId", outboundMessageId);
+            update.Parameters.AddWithValue("$channel", OutboundOrigin.Channel);
+            await update.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
 
     public async Task<int> CountOutboundByInteractionAsync(
         string interactionId,
@@ -1973,6 +2193,90 @@ public sealed class RelayStore
             reader.IsDBNull(1) ? null : reader.GetString(1),
             reader.IsDBNull(2) ? null : reader.GetString(2),
             reader.GetInt64(3));
+    }
+
+    // Chat-like channel lines must not land in the game long after the conversation moved on.
+    // Anything still unclaimed past the window is sealed as never sent; a claimed line is left to
+    // the ordinary completion/claim-expiry path. Interaction-origin lines are never touched.
+    private async Task<int> ExpireStaleChannelOutboundAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        long nowMs,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE outbound_messages
+            SET state = $notSent,
+                completion_reason = 'expired',
+                completed_at_ms = $now
+            WHERE origin = $channel
+              AND state = $pending
+              AND created_at_ms <= $cutoff;
+            """;
+        command.Parameters.AddWithValue("$notSent", (int)OutboundState.NotSent);
+        command.Parameters.AddWithValue("$pending", (int)OutboundState.Pending);
+        command.Parameters.AddWithValue("$channel", OutboundOrigin.Channel);
+        command.Parameters.AddWithValue("$now", nowMs);
+        command.Parameters.AddWithValue(
+            "$cutoff",
+            nowMs - (long)options.ChannelMessageMaxQueueDuration.TotalMilliseconds);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task EnqueueSendConfirmationAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        string nodeId,
+        string outboundMessageId,
+        int cwlsSlot,
+        string displayName,
+        string content,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        string senderName;
+        string? senderWorld;
+        await using (var node = connection.CreateCommand())
+        {
+            node.Transaction = transaction;
+            node.CommandText = """
+                SELECT COALESCE(character_name, label), home_world_name
+                FROM relay_nodes
+                WHERE node_id = $nodeId;
+                """;
+            node.Parameters.AddWithValue("$nodeId", nodeId);
+            await using var reader = await node.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return;
+            }
+
+            senderName = reader.GetString(0);
+            senderWorld = reader.IsDBNull(1) ? null : reader.GetString(1);
+        }
+
+        var nowMs = now.ToUnixTimeMilliseconds();
+        await using var insert = connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = """
+            INSERT OR IGNORE INTO inbound_observations(
+                observation_id, reporting_node_id, cwls_slot, sender_name, sender_world,
+                content, observed_at_ms, received_at_ms, publication_state)
+            VALUES (
+                $observationId, $nodeId, $cwlsSlot, $senderName, $senderWorld,
+                $content, $now, $now, $state);
+            """;
+        insert.Parameters.AddWithValue("$observationId", $"outbound:{outboundMessageId}");
+        insert.Parameters.AddWithValue("$nodeId", nodeId);
+        insert.Parameters.AddWithValue("$cwlsSlot", cwlsSlot);
+        insert.Parameters.AddWithValue("$senderName", senderName);
+        insert.Parameters.AddWithValue("$senderWorld", (object?)senderWorld ?? DBNull.Value);
+        insert.Parameters.AddWithValue("$content", RelayText.FormatGameLine(displayName, content));
+        insert.Parameters.AddWithValue("$now", nowMs);
+        insert.Parameters.AddWithValue("$state", (int)PublicationState.Pending);
+        await insert.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task SealExpiredOutboundClaimsAsync(

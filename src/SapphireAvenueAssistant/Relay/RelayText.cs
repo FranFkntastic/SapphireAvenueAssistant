@@ -54,6 +54,22 @@ public static class RelayText
         return builder.ToString();
     }
 
+    // Mirrors SapphireAvenueRelay.CwlsChannels.FormatDiscordLine: the plugin prefixes every
+    // game-bound line with "[Discord · Name] " (name capped at 80 UTF-8 bytes) inside a
+    // 494-byte budget and silently cuts whatever does not fit.
+    public const int GameLineByteBudget = 494;
+
+    public static string FormatGameLine(string displayName, string content) =>
+        GameLinePrefix(displayName) + content;
+
+    public static int GameContentByteLimit(string displayName, int configuredMaximumBytes) =>
+        Math.Min(
+            configuredMaximumBytes,
+            GameLineByteBudget - Encoding.UTF8.GetByteCount(GameLinePrefix(displayName)));
+
+    private static string GameLinePrefix(string displayName) =>
+        $"[Discord · {Normalize(displayName, 80) ?? "Discord"}] ";
+
     public static string NormalizeIdentityKey(string value) =>
         value.Normalize(NormalizationForm.FormKC).ToUpperInvariant();
 
