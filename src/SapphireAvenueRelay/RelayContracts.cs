@@ -33,7 +33,12 @@ internal enum DeliveryOutcome
     Ambiguous,
 }
 
-internal sealed record CompletionRequest(string InstanceId, long Epoch, string ClaimId, DeliveryOutcome Outcome);
+internal sealed record CompletionRequest(
+    string InstanceId,
+    long Epoch,
+    string ClaimId,
+    DeliveryOutcome Outcome,
+    int? EchoSlot = null);
 internal sealed record ObservationRequest(
     string InstanceId,
     long Epoch,

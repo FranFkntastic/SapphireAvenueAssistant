@@ -33,6 +33,8 @@ internal sealed class CwlsRelayWorker : IDisposable
     private string? pendingEchoText;
     private int? pendingEchoSlot;
     private string? pendingEchoCwlsName;
+    private bool pendingEchoSuppressesObservation;
+    private int? suppressedEchoSlot;
     private PendingSendSnapshot? pendingSend;
     private bool coordinatorReachable;
     private string role = "offline";
@@ -431,6 +433,7 @@ internal sealed class CwlsRelayWorker : IDisposable
                 return;
 
             DeliveryOutcome outcome;
+            int? echoSlot = null;
             try
             {
                 var echoText = CwlsChannels.FormatDiscordLine(message.DiscordDisplayName, message.Content);
@@ -439,8 +442,10 @@ internal sealed class CwlsRelayWorker : IDisposable
                     message.MessageId,
                     message.ClaimId,
                     requireDirection: true,
+                    suppressEchoObservation: true,
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 outcome = attempt.Outcome;
+                echoSlot = attempt.SuppressedEchoSlot;
                 if (outcome != DeliveryOutcome.Sent)
                 {
                     lock (gate) lastError = attempt.Detail;
@@ -465,6 +470,7 @@ internal sealed class CwlsRelayWorker : IDisposable
                     leaseEpoch,
                     message,
                     outcome,
+                    echoSlot,
                     completionTimeout.Token).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
@@ -483,13 +489,16 @@ internal sealed class CwlsRelayWorker : IDisposable
         string messageId,
         string claimId,
         bool requireDirection,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool suppressEchoObservation = false)
     {
         var echo = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (gate)
         {
             pendingEcho = echo;
             pendingEchoText = echoText;
+            pendingEchoSuppressesObservation = suppressEchoObservation;
+            suppressedEchoSlot = null;
             pendingSend = new PendingSendSnapshot(messageId, claimId, echoText, DateTimeOffset.UtcNow);
         }
 
@@ -506,7 +515,9 @@ internal sealed class CwlsRelayWorker : IDisposable
             try
             {
                 await echo.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-                return new SendAttemptResult(DeliveryOutcome.Sent, "Matching CWLS echo observed.");
+                int? echoSlot;
+                lock (gate) echoSlot = suppressedEchoSlot;
+                return new SendAttemptResult(DeliveryOutcome.Sent, "Matching CWLS echo observed.", echoSlot);
             }
             catch (OperationCanceledException)
             {
@@ -525,6 +536,8 @@ internal sealed class CwlsRelayWorker : IDisposable
                     pendingEchoText = null;
                     pendingEchoSlot = null;
                     pendingEchoCwlsName = null;
+                    pendingEchoSuppressesObservation = false;
+                    suppressedEchoSlot = null;
                     pendingSend = null;
                 }
             }
@@ -580,13 +593,22 @@ internal sealed class CwlsRelayWorker : IDisposable
                 echo = pendingEcho;
             }
 
-            if (configuration.ObserveToDiscordEnabled &&
+            var mayReport = configuration.ObserveToDiscordEnabled &&
                 slot.Value == configuration.CwlsSlot &&
                 IsExactSlotMatch(actualName) &&
                 RelayConfigurationPolicy.MayReportObservation(
                     role,
                     leaseExpiresAtUtc,
-                    DateTimeOffset.UtcNow))
+                    DateTimeOffset.UtcNow);
+            if (mayReport && echo is not null && pendingEchoSuppressesObservation)
+            {
+                // The confirmed echo of a coordinator send is not an ordinary observation: the
+                // coordinator renders the confirmation itself (or only reacts, for channel
+                // messages), so reporting it would post every relayed line twice. The slot tells
+                // the coordinator this echo would otherwise have been published.
+                suppressedEchoSlot = slot.Value;
+            }
+            else if (mayReport)
             {
                 var observedAt = chatMessage.Timestamp > 0
                     ? DateTimeOffset.FromUnixTimeSeconds(chatMessage.Timestamp)
@@ -726,7 +748,7 @@ internal sealed class CwlsRelayWorker : IDisposable
     };
 
     private sealed record SendSubmission(bool Submitted, string Detail);
-    private sealed record SendAttemptResult(DeliveryOutcome Outcome, string Detail);
+    private sealed record SendAttemptResult(DeliveryOutcome Outcome, string Detail, int? SuppressedEchoSlot = null);
     private sealed record RelayCycleContext(RelaySendEligibility SendEligibility, RelayGameIdentity Identity);
 }
 

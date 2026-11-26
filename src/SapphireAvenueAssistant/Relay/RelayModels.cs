@@ -5,7 +5,54 @@ public enum OutboundState
     Pending,
     Claimed,
     Sent,
-    Ambiguous
+    Ambiguous,
+
+    // Terminal "never transmitted" for channel-origin lines (not-sent or expired before any claim).
+    // Interaction-origin not-sent completions still requeue as Pending.
+    NotSent
+}
+
+public static class OutboundOrigin
+{
+    public const string Interaction = "interaction";
+    public const string Channel = "channel";
+}
+
+public sealed record ChannelOutboundSource(string ChannelId, string MessageId);
+
+public sealed record PendingChannelReaction(
+    string OutboundMessageId,
+    string ChannelId,
+    string SourceMessageId,
+    string Emoji,
+    int AttemptCount);
+
+// Feedback on the source Discord message for ordinary channel-message ingestion.
+public static class ChannelReactions
+{
+    public const string Sent = "✅"; // check mark: the CWLS echo was observed
+    public const string Ambiguous = "⚠️"; // warning: may or may not have reached the CWLS
+    public const string NotSent = "❌"; // cross: definitely not sent
+    public const string RoleRequired = "\U0001F6AB"; // no entry: author lacks the relay role
+    public const string Paused = "⏸️"; // pause: the relay is paused
+    public const string TooLong = "✂️"; // scissors: too long for one CWLS line
+    public const string Expired = "⌛"; // hourglass: no relay picked it up in time
+
+    public static string ForTerminalState(OutboundState state, string? completionReason) => state switch
+    {
+        OutboundState.Sent => Sent,
+        OutboundState.Ambiguous => Ambiguous,
+        OutboundState.NotSent when completionReason == "expired" => Expired,
+        OutboundState.NotSent => NotSent,
+        _ => throw new ArgumentOutOfRangeException(nameof(state))
+    };
+}
+
+public enum ReactionCompletion
+{
+    Reacted,
+    Retry,
+    Abandoned
 }
 
 public enum DeliveryOutcome

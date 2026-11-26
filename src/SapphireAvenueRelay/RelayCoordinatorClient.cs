@@ -92,13 +92,14 @@ internal sealed class RelayCoordinatorClient : IDisposable
         long epoch,
         OutboundRelayMessage message,
         DeliveryOutcome outcome,
+        int? echoSlot,
         CancellationToken cancellationToken)
     {
         using var response = await SendAsync(
             HttpMethod.Post,
             $"outbound/{Uri.EscapeDataString(message.MessageId)}/complete",
             JsonContent.Create(
-                new CompletionRequest(instanceId, epoch, message.ClaimId, outcome),
+                new CompletionRequest(instanceId, epoch, message.ClaimId, outcome, echoSlot),
                 RelayJsonContext.Default.CompletionRequest),
             cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();

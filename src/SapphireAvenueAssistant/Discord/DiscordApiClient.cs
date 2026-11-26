@@ -23,11 +23,38 @@ public sealed record DiscordPublishResult(
     string? Error = null,
     TimeSpan? RetryAfter = null);
 
+public enum DiscordReactionOutcome
+{
+    Added,
+    RetryableRejection,
+    TerminalRejection
+}
+
+public sealed record DiscordReactionResult(
+    DiscordReactionOutcome Outcome,
+    string? Error = null,
+    TimeSpan? RetryAfter = null);
+
+public sealed record DiscordGatewayInfo(
+    string? Url,
+    int? SessionStartRemaining = null,
+    TimeSpan? SessionStartResetAfter = null,
+    bool Unauthorized = false,
+    string? Error = null);
+
 public interface IDiscordApiClient
 {
     Task<DiscordPublishResult> PublishObservationAsync(
         DiscordPublishWorkItem workItem,
         CancellationToken cancellationToken = default);
+
+    Task<DiscordReactionResult> AddReactionAsync(
+        string channelId,
+        string messageId,
+        string emoji,
+        CancellationToken cancellationToken = default);
+
+    Task<DiscordGatewayInfo> GetGatewayBotAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class DiscordApiClient(
@@ -36,6 +63,7 @@ public sealed class DiscordApiClient(
     ILogger<DiscordApiClient> logger) : IDiscordApiClient
 {
     private static readonly TimeSpan MaximumRetryAfter = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MaximumReactionRetryAfter = TimeSpan.FromMinutes(2);
 
     public async Task<DiscordPublishResult> PublishObservationAsync(
         DiscordPublishWorkItem workItem,
@@ -133,6 +161,148 @@ public sealed class DiscordApiClient(
                 : new DiscordPublishResult(
                     DiscordPublishOutcome.TerminalRejection,
                     Error: error);
+        }
+    }
+
+    // Reactions are best-effort feedback. PUT .../@me is idempotent, so every inconclusive
+    // response is safe to retry; only a definite client rejection stops the attempt.
+    public async Task<DiscordReactionResult> AddReactionAsync(
+        string channelId,
+        string messageId,
+        string emoji,
+        CancellationToken cancellationToken = default)
+    {
+        if (!options.Discord.CanPublish ||
+            !DiscordOptions.IsSnowflake(channelId) ||
+            !DiscordOptions.IsSnowflake(messageId))
+        {
+            return new DiscordReactionResult(
+                DiscordReactionOutcome.TerminalRejection,
+                "Discord reactions are not configured or the target is invalid.");
+        }
+
+        var relativePath =
+            $"channels/{Uri.EscapeDataString(channelId)}/messages/{Uri.EscapeDataString(messageId)}" +
+            $"/reactions/{Uri.EscapeDataString(emoji)}/@me";
+        using var request = new HttpRequestMessage(HttpMethod.Put, relativePath);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bot", options.Discord.BotToken);
+        request.Headers.UserAgent.ParseAdd("Sapphire-Avenue-Discord-Bridge/1.0");
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new DiscordReactionResult(DiscordReactionOutcome.RetryableRejection, "Discord reaction timed out.");
+        }
+        catch (HttpRequestException exception)
+        {
+            return new DiscordReactionResult(DiscordReactionOutcome.RetryableRejection, exception.Message);
+        }
+
+        using (response)
+        {
+            if (response.IsSuccessStatusCode)
+            {
+                return new DiscordReactionResult(DiscordReactionOutcome.Added);
+            }
+
+            if (response.StatusCode == HttpStatusCode.TooManyRequests)
+            {
+                // Read retry_after before anything else consumes the body.
+                var retryAfter = await ReadRetryAfterAsync(response, cancellationToken);
+                return new DiscordReactionResult(
+                    DiscordReactionOutcome.RetryableRejection,
+                    "Discord rate-limited the reaction.",
+                    retryAfter is { } delay && delay >= TimeSpan.Zero
+                        ? (delay <= MaximumReactionRetryAfter ? delay : MaximumReactionRetryAfter)
+                        : TimeSpan.FromSeconds(2));
+            }
+
+            var error = await ReadErrorAsync(response, cancellationToken);
+            return (int)response.StatusCode >= 500
+                ? new DiscordReactionResult(DiscordReactionOutcome.RetryableRejection, error)
+                : new DiscordReactionResult(DiscordReactionOutcome.TerminalRejection, error);
+        }
+    }
+
+    public async Task<DiscordGatewayInfo> GetGatewayBotAsync(CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(options.Discord.BotToken))
+        {
+            return new DiscordGatewayInfo(null, Error: "The Discord bot token is not configured.");
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "gateway/bot");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bot", options.Discord.BotToken);
+        request.Headers.UserAgent.ParseAdd("Sapphire-Avenue-Discord-Bridge/1.0");
+        HttpResponseMessage response;
+        try
+        {
+            response = await httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return new DiscordGatewayInfo(null, Error: "Discord gateway discovery timed out.");
+        }
+        catch (HttpRequestException exception)
+        {
+            return new DiscordGatewayInfo(null, Error: exception.Message);
+        }
+
+        using (response)
+        {
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                return new DiscordGatewayInfo(null, Unauthorized: true, Error: "Discord rejected the bot token.");
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return new DiscordGatewayInfo(null, Error: await ReadErrorAsync(response, cancellationToken));
+            }
+
+            try
+            {
+                using var payload = await JsonDocument.ParseAsync(
+                    await response.Content.ReadAsStreamAsync(cancellationToken),
+                    cancellationToken: cancellationToken);
+                var root = payload.RootElement;
+                var url = root.TryGetProperty("url", out var urlElement) && urlElement.ValueKind == JsonValueKind.String
+                    ? urlElement.GetString()
+                    : null;
+                int? remaining = null;
+                TimeSpan? resetAfter = null;
+                if (root.TryGetProperty("session_start_limit", out var limit) && limit.ValueKind == JsonValueKind.Object)
+                {
+                    if (limit.TryGetProperty("remaining", out var remainingElement) &&
+                        remainingElement.TryGetInt32(out var remainingValue))
+                    {
+                        remaining = remainingValue;
+                    }
+
+                    if (limit.TryGetProperty("reset_after", out var resetElement) &&
+                        resetElement.TryGetInt64(out var resetMs))
+                    {
+                        resetAfter = TimeSpan.FromMilliseconds(resetMs);
+                    }
+                }
+
+                return url is not null &&
+                    Uri.TryCreate(url, UriKind.Absolute, out var parsed) &&
+                    parsed.Scheme == "wss"
+                    ? new DiscordGatewayInfo(url, remaining, resetAfter)
+                    : new DiscordGatewayInfo(null, Error: "Discord returned no usable gateway URL.");
+            }
+            catch (JsonException)
+            {
+                return new DiscordGatewayInfo(null, Error: "Discord returned an unreadable gateway response.");
+            }
         }
     }
 

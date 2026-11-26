@@ -55,6 +55,8 @@ public sealed class RelayOptions
 
     public int MaximumMessageBytes { get; init; } = 400;
 
+    public int ChannelMessageMaxQueueSeconds { get; init; } = 120;
+
     public bool AllowLegacyHeartbeatWithoutCapability { get; init; } = true;
 
     public Dictionary<string, string> NodeTokens { get; init; } = new(StringComparer.Ordinal);
@@ -64,6 +66,9 @@ public sealed class RelayOptions
     public TimeSpan ClaimLeaseDuration => TimeSpan.FromSeconds(Math.Clamp(ClaimLeaseSeconds, 5, 300));
 
     public TimeSpan PublishLeaseDuration => TimeSpan.FromSeconds(Math.Clamp(PublishLeaseSeconds, 5, 300));
+
+    public TimeSpan ChannelMessageMaxQueueDuration =>
+        TimeSpan.FromSeconds(Math.Clamp(ChannelMessageMaxQueueSeconds, 15, 3600));
 
     public int BoundedMaximumMessageBytes => Math.Clamp(MaximumMessageBytes, 64, 500);
 

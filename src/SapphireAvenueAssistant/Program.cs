@@ -34,6 +34,11 @@ builder.Services.AddSingleton(services => new DiscordCommandRegistrationService(
     services.GetRequiredService<ILogger<DiscordCommandRegistrationService>>()));
 builder.Services.AddHostedService(services => services.GetRequiredService<DiscordCommandRegistrationService>());
 builder.Services.AddHostedService<DiscordInboundPublisher>();
+builder.Services.AddSingleton<DiscordReactionWorker>();
+builder.Services.AddHostedService(services => services.GetRequiredService<DiscordReactionWorker>());
+builder.Services.AddSingleton<ChannelMessageIngestor>();
+builder.Services.AddSingleton<DiscordGatewayService>();
+builder.Services.AddHostedService(services => services.GetRequiredService<DiscordGatewayService>());
 
 var app = builder.Build();
 await app.Services.GetRequiredService<RelayStore>().InitializeAsync();
@@ -50,6 +55,7 @@ app.MapGet(
     async Task<IResult> (
         RelayStore store,
         DiscordCommandRegistrationService commandRegistration,
+        DiscordGatewayService gateway,
         CancellationToken cancellationToken) =>
     {
         var relayConfiguration = await store.GetCommunityConfigurationAsync(
@@ -69,6 +75,7 @@ app.MapGet(
             discordInteractions = sapphireOptions.Discord.CanVerifyInteractions,
             discordPublication = sapphireOptions.Discord.CanPublish,
             discordCommands = commandRegistration.Status,
+            discordGateway = gateway.Status,
             pairingBootstrap = sapphireOptions.Relay.CanIssueConnectionStrings,
             relayConfigured = relayConfiguration is not null,
             relayNodes

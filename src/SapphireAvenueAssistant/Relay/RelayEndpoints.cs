@@ -170,6 +170,7 @@ public static class RelayEndpoints
                     body.ClaimId,
                     body.Outcome,
                     timeProvider.GetUtcNow(),
+                    body.EchoSlot is >= 1 and <= 8 ? body.EchoSlot : null,
                     cancellationToken);
                 return completed switch
                 {
@@ -271,7 +272,8 @@ public sealed record CompletionRequest(
     string InstanceId,
     long Epoch,
     string ClaimId,
-    DeliveryOutcome Outcome);
+    DeliveryOutcome Outcome,
+    int? EchoSlot = null);
 
 public sealed record ObservationRequest(
     string InstanceId,
