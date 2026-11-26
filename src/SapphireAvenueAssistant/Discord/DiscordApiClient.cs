@@ -26,6 +26,7 @@ public sealed record DiscordPublishResult(
 public enum DiscordReactionOutcome
 {
     Added,
+    Removed,
     RetryableRejection,
     TerminalRejection
 }
@@ -49,6 +50,13 @@ public interface IDiscordApiClient
         CancellationToken cancellationToken = default);
 
     Task<DiscordReactionResult> AddReactionAsync(
+        string channelId,
+        string messageId,
+        string emoji,
+        CancellationToken cancellationToken = default);
+
+    // Removes only the bot's own reaction. A missing message or reaction counts as removed.
+    Task<DiscordReactionResult> RemoveOwnReactionAsync(
         string channelId,
         string messageId,
         string emoji,
@@ -164,14 +172,30 @@ public sealed class DiscordApiClient(
         }
     }
 
-    // Reactions are best-effort feedback. PUT .../@me is idempotent, so every inconclusive
-    // response is safe to retry; only a definite client rejection stops the attempt.
-    public async Task<DiscordReactionResult> AddReactionAsync(
+    // Reactions are best-effort feedback. PUT and DELETE on .../@me are idempotent, so every
+    // inconclusive response is safe to retry; only a definite client rejection stops the attempt.
+    public Task<DiscordReactionResult> AddReactionAsync(
         string channelId,
         string messageId,
         string emoji,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        SendOwnReactionAsync(HttpMethod.Put, channelId, messageId, emoji, cancellationToken);
+
+    public Task<DiscordReactionResult> RemoveOwnReactionAsync(
+        string channelId,
+        string messageId,
+        string emoji,
+        CancellationToken cancellationToken = default) =>
+        SendOwnReactionAsync(HttpMethod.Delete, channelId, messageId, emoji, cancellationToken);
+
+    private async Task<DiscordReactionResult> SendOwnReactionAsync(
+        HttpMethod method,
+        string channelId,
+        string messageId,
+        string emoji,
+        CancellationToken cancellationToken)
     {
+        var removing = method == HttpMethod.Delete;
         if (!options.Discord.CanPublish ||
             !DiscordOptions.IsSnowflake(channelId) ||
             !DiscordOptions.IsSnowflake(messageId))
@@ -184,7 +208,7 @@ public sealed class DiscordApiClient(
         var relativePath =
             $"channels/{Uri.EscapeDataString(channelId)}/messages/{Uri.EscapeDataString(messageId)}" +
             $"/reactions/{Uri.EscapeDataString(emoji)}/@me";
-        using var request = new HttpRequestMessage(HttpMethod.Put, relativePath);
+        using var request = new HttpRequestMessage(method, relativePath);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bot", options.Discord.BotToken);
         request.Headers.UserAgent.ParseAdd("Sapphire-Avenue-Discord-Bridge/1.0");
 
@@ -209,7 +233,14 @@ public sealed class DiscordApiClient(
         {
             if (response.IsSuccessStatusCode)
             {
-                return new DiscordReactionResult(DiscordReactionOutcome.Added);
+                return new DiscordReactionResult(
+                    removing ? DiscordReactionOutcome.Removed : DiscordReactionOutcome.Added);
+            }
+
+            if (removing && response.StatusCode == HttpStatusCode.NotFound)
+            {
+                // The message was deleted or the reaction is already gone: nothing left to remove.
+                return new DiscordReactionResult(DiscordReactionOutcome.Removed);
             }
 
             if (response.StatusCode == HttpStatusCode.TooManyRequests)

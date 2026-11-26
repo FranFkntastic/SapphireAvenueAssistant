@@ -55,6 +55,14 @@ public enum ReactionCompletion
     Abandoned
 }
 
+// Removal of an older message's check mark once a newer channel message carries its own.
+public enum ReactionClearCompletion
+{
+    Cleared,
+    Retry,
+    Abandoned
+}
+
 public enum DeliveryOutcome
 {
     Sent,
