@@ -10,6 +10,7 @@ namespace SapphireAvenueAssistant.Discord;
 public sealed class ChannelMessageIngestor(
     RelayStore store,
     DiscordReactionWorker reactions,
+    DiscordMentionResolver mentionNames,
     SapphireAvenueOptions options,
     TimeProvider timeProvider,
     ILogger<ChannelMessageIngestor> logger)
@@ -19,6 +20,9 @@ public sealed class ChannelMessageIngestor(
 
     public async Task HandleMessageCreateAsync(JsonElement message, CancellationToken cancellationToken)
     {
+        // Any guild message teaches the resolver who is called what, so the game can ping them.
+        mentionNames.Observe(message);
+
         if (!TryGetString(message, "guild_id", out var guildId) ||
             !string.Equals(guildId, options.Discord.GuildId, StringComparison.Ordinal) ||
             !TryGetString(message, "channel_id", out var channelId) ||

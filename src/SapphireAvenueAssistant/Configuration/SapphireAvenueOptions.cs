@@ -25,6 +25,10 @@ public sealed class DiscordOptions
 
     public string[] AllowedRoleIds { get; init; } = [];
 
+    // "@Name" typed in the game pings the one guild member whose nickname, display name or
+    // username is exactly Name. Unknown or ambiguous names stay plain text.
+    public bool ResolveGameMentions { get; init; } = true;
+
     public bool CanVerifyInteractions =>
         PublicKey.Length == 64 && PublicKey.All(Uri.IsHexDigit) &&
         IsSnowflake(ApplicationId) &&
