@@ -53,6 +53,10 @@ The bot reacts to each relay-channel message with what happened:
 
 Reactions come from durable state, so a coordinator restart does not lose them. They never hold up delivery. Relay plugins older than 0.4.1.0 still report their own echo, which means channel messages show up twice until those nodes update.
 
+### Pinging Discord members from the game
+
+Type `@Name` in the CWLS exactly as the person appears in Discord: their server nickname, display name, or username. Case does not matter. If exactly one member has that name, the relayed line pings them. Unknown or ambiguous names stay plain text, and roles, `@everyone`, and `@here` never ping. Set `Discord:ResolveGameMentions` to `false` to turn this off.
+
 ## Configure a relay
 
 1. A server manager runs `/bridge configure` and selects the relay channel and the role allowed to relay, both by typing in the channel and with `/cwls message`.

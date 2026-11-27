@@ -17,6 +17,16 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<RelayStore>();
 builder.Services.AddSingleton<RelayAuthenticator>();
 builder.Services.AddSingleton<DiscordRequestVerifier>();
+builder.Services.AddHttpClient("DiscordMentionSearch", client =>
+{
+    client.BaseAddress = new Uri("https://discord.com/api/v10/");
+    client.Timeout = TimeSpan.FromSeconds(5);
+});
+builder.Services.AddSingleton(services => new DiscordMentionResolver(
+    services.GetRequiredService<IHttpClientFactory>().CreateClient("DiscordMentionSearch"),
+    services.GetRequiredService<SapphireAvenueOptions>(),
+    services.GetRequiredService<TimeProvider>(),
+    services.GetRequiredService<ILogger<DiscordMentionResolver>>()));
 builder.Services.AddHttpClient<IDiscordApiClient, DiscordApiClient>(client =>
 {
     client.BaseAddress = new Uri("https://discord.com/api/v10/");

@@ -68,10 +68,37 @@ public interface IDiscordApiClient
 public sealed class DiscordApiClient(
     HttpClient httpClient,
     SapphireAvenueOptions options,
+    DiscordMentionResolver mentionResolver,
     ILogger<DiscordApiClient> logger) : IDiscordApiClient
 {
     private static readonly TimeSpan MaximumRetryAfter = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan MaximumReactionRetryAfter = TimeSpan.FromMinutes(2);
+
+    // Escapes the game text between resolved mentions and splices each one in as <@id>.
+    private static string RenderContent(string raw, IReadOnlyList<GameMention> mentions)
+    {
+        if (mentions.Count == 0)
+        {
+            return RelayText.EscapeDiscordMarkdown(raw);
+        }
+
+        var builder = new StringBuilder(raw.Length + (mentions.Count * 24));
+        var position = 0;
+        foreach (var mention in mentions.OrderBy(mention => mention.Start))
+        {
+            if (mention.Start < position)
+            {
+                continue;
+            }
+
+            builder.Append(RelayText.EscapeDiscordMarkdown(raw[position..mention.Start]));
+            builder.Append("<@").Append(mention.UserId).Append('>');
+            position = mention.Start + mention.Length;
+        }
+
+        builder.Append(RelayText.EscapeDiscordMarkdown(raw[position..]));
+        return builder.ToString();
+    }
 
     public async Task<DiscordPublishResult> PublishObservationAsync(
         DiscordPublishWorkItem workItem,
@@ -88,7 +115,6 @@ public sealed class DiscordApiClient(
         var world = string.IsNullOrWhiteSpace(workItem.SenderWorld)
             ? string.Empty
             : $" @ {RelayText.EscapeDiscordMarkdown(workItem.SenderWorld)}";
-        var content = RelayText.EscapeDiscordMarkdown(workItem.Content);
         var nonce = Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(workItem.ObservationId)))[..24];
         if (!DiscordOptions.IsSnowflake(workItem.ChannelId))
@@ -97,6 +123,16 @@ public sealed class DiscordApiClient(
                 DiscordPublishOutcome.TerminalRejection,
                 Error: "Discord relay channel is not configured.");
         }
+
+        // Only the game text is resolved, never the sender prefix. Pings are limited to exactly
+        // the resolver-chosen users: parse stays empty, so a raw <@id>, <@&id> or @everyone typed
+        // in the game renders but never notifies anyone.
+        var mentions = await mentionResolver.ResolveAsync(workItem.Content, cancellationToken);
+        var content = RenderContent(workItem.Content, mentions);
+        var pingedUsers = mentions
+            .Select(mention => mention.UserId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
 
         var relativePath = $"channels/{Uri.EscapeDataString(workItem.ChannelId)}/messages";
         using var request = new HttpRequestMessage(HttpMethod.Post, relativePath)
@@ -107,7 +143,8 @@ public sealed class DiscordApiClient(
                 nonce,
                 allowed_mentions = new
                 {
-                    parse = Array.Empty<string>()
+                    parse = Array.Empty<string>(),
+                    users = pingedUsers
                 }
             })
         };
@@ -371,7 +408,7 @@ public sealed class DiscordApiClient(
             : error;
     }
 
-    private static async Task<TimeSpan?> ReadRetryAfterAsync(
+    internal static async Task<TimeSpan?> ReadRetryAfterAsync(
         HttpResponseMessage response,
         CancellationToken cancellationToken)
     {
